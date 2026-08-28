@@ -7,16 +7,17 @@ de Computação Gráfica.
 
 ...
 
-## Funcionalidades principais
+## Funcionalidades planejadas
 
-- Partidas multiplayer no mesmo computador
-- Dois times com até 3 jogadores
-- Controle individual dos jogadores
-- Troca automática para o jogador mais próximo da bola
-- Bola com física e colisão com as paredes
-- Sistema de gols e placar
-- Reinício da partida após cada gol
-- Personalização das configurações da partida
+- [ ] Multiplayer local
+- [ ] Até 3 jogadores por time
+- [ ] Movimentação dos jogadores
+- [ ] Troca de jogador
+- [ ] Física da bola
+- [ ] Colisão com as paredes
+- [ ] Sistema de gols
+- [ ] Placar
+- [ ] Personalização da partida
 
 ## Controles
 
@@ -34,6 +35,10 @@ de Computação Gráfica.
 - OpenGL
 - GLFW
 - ...
+
+## Status
+
+Em desenvolvimento.
 
 ## Conceitos de Computação Gráfica
 
