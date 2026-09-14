@@ -10,6 +10,9 @@ class Player {
 public:
     Player(float x, float y, float speed, float radius, Team team);
 
+    void move(float directionX, float directionY, float deltaTime);
+    void keepInside(float left, float right, float bottom, float top);
+
     float getX() const;
     float getY() const;
     float getSpeed() const;

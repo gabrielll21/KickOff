@@ -82,6 +82,36 @@ void drawArc(float centerX, float centerY, float radius,
     glEnd();
 }
 
+void handlePlayerInput(GLFWwindow* window, Player& player, float deltaTime) {
+    float directionX = 0.0F;
+    float directionY = 0.0F;
+
+    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) {
+        directionY += 1.0F;
+    }
+    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) {
+        directionY -= 1.0F;
+    }
+    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) {
+        directionX -= 1.0F;
+    }
+    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) {
+        directionX += 1.0F;
+    }
+
+    const float directionLength =
+            std::sqrt(directionX * directionX + directionY * directionY);
+
+    if (directionLength > 0.0F) {
+        directionX /= directionLength;
+        directionY /= directionLength;
+        player.move(directionX, directionY, deltaTime);
+    }
+
+    player.keepInside(-FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
+                      -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT);
+}
+
 void drawPlayer(const Player& player) {
     constexpr int SEGMENTS = 48;
 
@@ -174,10 +204,17 @@ int main() {
     glfwGetFramebufferSize(window, &framebufferWidth, &framebufferHeight);
     configureProjection(window, framebufferWidth, framebufferHeight);
 
-    const Player player(PLAYER_INITIAL_X, PLAYER_INITIAL_Y,
-                        PLAYER_SPEED, PLAYER_RADIUS, Team::Blue);
+    Player player(PLAYER_INITIAL_X, PLAYER_INITIAL_Y,
+                  PLAYER_SPEED, PLAYER_RADIUS, Team::Blue);
+
+    double previousTime = glfwGetTime();
 
     while (glfwWindowShouldClose(window) == GLFW_FALSE) {
+        const double currentTime = glfwGetTime();
+        const float deltaTime = static_cast<float>(currentTime - previousTime);
+        previousTime = currentTime;
+
+        handlePlayerInput(window, player, deltaTime);
         glClearColor(0.03F, 0.12F, 0.05F, 1.0F);
         glClear(GL_COLOR_BUFFER_BIT);
 
