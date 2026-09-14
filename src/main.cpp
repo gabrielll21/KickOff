@@ -19,6 +19,7 @@ constexpr float BALL_INITIAL_Y = 0.0F;
 constexpr float BALL_INITIAL_VELOCITY_X = 14.0F;
 constexpr float BALL_INITIAL_VELOCITY_Y = 9.0F;
 constexpr float BALL_RADIUS = 1.0F;
+constexpr float BALL_IMPACT_SPEED = 20.0F;
 constexpr float FIELD_HALF_HEIGHT = 34.0F;
 constexpr double PI = 3.14159265358979323846;
 
@@ -116,6 +117,43 @@ void handlePlayerInput(GLFWwindow* window, Player& player, float deltaTime) {
 
     player.keepInside(-FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
                       -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT);
+}
+
+void resolvePlayerBallCollision(const Player& player, Ball& ball) {
+    const float deltaX = ball.getX() - player.getX();
+    const float deltaY = ball.getY() - player.getY();
+    const float minimumDistance = player.getRadius() + ball.getRadius();
+    const float distanceSquared = deltaX * deltaX + deltaY * deltaY;
+
+    if (distanceSquared > minimumDistance * minimumDistance) {
+        return;
+    }
+
+    float directionX;
+    float directionY;
+    const float distance = std::sqrt(distanceSquared);
+
+    if (distance > 0.0001F) {
+        directionX = deltaX / distance;
+        directionY = deltaY / distance;
+    } else {
+        const float velocityLength = std::sqrt(
+                ball.getVelocityX() * ball.getVelocityX()
+                + ball.getVelocityY() * ball.getVelocityY());
+
+        if (velocityLength > 0.0001F) {
+            directionX = ball.getVelocityX() / velocityLength;
+            directionY = ball.getVelocityY() / velocityLength;
+        } else {
+            directionX = 1.0F;
+            directionY = 0.0F;
+        }
+    }
+
+    ball.setX(player.getX() + directionX * minimumDistance);
+    ball.setY(player.getY() + directionY * minimumDistance);
+    ball.setVelocityX(directionX * BALL_IMPACT_SPEED);
+    ball.setVelocityY(directionY * BALL_IMPACT_SPEED);
 }
 
 void drawPlayer(const Player& player) {
@@ -245,6 +283,7 @@ int main() {
         previousTime = currentTime;
 
         handlePlayerInput(window, player, deltaTime);
+        resolvePlayerBallCollision(player, ball);
         ball.update(deltaTime, -FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
                     -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT);
         glClearColor(0.03F, 0.12F, 0.05F, 1.0F);
