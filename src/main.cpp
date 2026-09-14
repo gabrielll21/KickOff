@@ -1,3 +1,5 @@
+#include "entities/Player.h"
+
 #include <GLFW/glfw3.h>
 
 #include <cmath>
@@ -7,6 +9,10 @@ namespace {
 constexpr double WORLD_WIDTH = 120.0;
 constexpr double WORLD_HEIGHT = 80.0;
 constexpr float FIELD_HALF_WIDTH = 52.5F;
+constexpr float PLAYER_INITIAL_X = -20.0F;
+constexpr float PLAYER_INITIAL_Y = 0.0F;
+constexpr float PLAYER_SPEED = 12.0F;
+constexpr float PLAYER_RADIUS = 2.0F;
 constexpr float FIELD_HALF_HEIGHT = 34.0F;
 constexpr double PI = 3.14159265358979323846;
 
@@ -73,6 +79,27 @@ void drawArc(float centerX, float centerY, float radius,
         glVertex2d(centerX + radius * std::cos(angle),
                    centerY + radius * std::sin(angle));
     }
+    glEnd();
+}
+
+void drawPlayer(const Player& player) {
+    constexpr int SEGMENTS = 48;
+
+    if (player.getTeam() == Team::Blue) {
+        glColor3f(0.1F, 0.3F, 0.95F);
+    } else {
+        glColor3f(0.9F, 0.15F, 0.15F);
+    }
+
+    glBegin(GL_TRIANGLE_FAN);
+    glVertex2f(player.getX(), player.getY());
+
+    for (int i = 0; i <= SEGMENTS; ++i) {
+        const double angle = 2.0 * PI * i / SEGMENTS;
+        glVertex2d(player.getX() + player.getRadius() * std::cos(angle),
+                   player.getY() + player.getRadius() * std::sin(angle));
+    }
+
     glEnd();
 }
 
@@ -147,12 +174,16 @@ int main() {
     glfwGetFramebufferSize(window, &framebufferWidth, &framebufferHeight);
     configureProjection(window, framebufferWidth, framebufferHeight);
 
+    const Player player(PLAYER_INITIAL_X, PLAYER_INITIAL_Y,
+                        PLAYER_SPEED, PLAYER_RADIUS, Team::Blue);
+
     while (glfwWindowShouldClose(window) == GLFW_FALSE) {
         glClearColor(0.03F, 0.12F, 0.05F, 1.0F);
         glClear(GL_COLOR_BUFFER_BIT);
 
         glLoadIdentity();
         drawField();
+        drawPlayer(player);
 
         glfwSwapBuffers(window);
         glfwPollEvents();
