@@ -16,7 +16,8 @@ constexpr float PLAYER_SPEED = 12.0F;
 constexpr float PLAYER_RADIUS = 2.0F;
 constexpr float BALL_INITIAL_X = 0.0F;
 constexpr float BALL_INITIAL_Y = 0.0F;
-constexpr float BALL_INITIAL_VELOCITY = 0.0F;
+constexpr float BALL_INITIAL_VELOCITY_X = 14.0F;
+constexpr float BALL_INITIAL_VELOCITY_Y = 9.0F;
 constexpr float BALL_RADIUS = 1.0F;
 constexpr float FIELD_HALF_HEIGHT = 34.0F;
 constexpr double PI = 3.14159265358979323846;
@@ -232,9 +233,9 @@ int main() {
     Player player(PLAYER_INITIAL_X, PLAYER_INITIAL_Y,
                   PLAYER_SPEED, PLAYER_RADIUS, Team::Blue);
 
-    const Ball ball(BALL_INITIAL_X, BALL_INITIAL_Y,
-                    BALL_INITIAL_VELOCITY, BALL_INITIAL_VELOCITY,
-                    BALL_RADIUS);
+    Ball ball(BALL_INITIAL_X, BALL_INITIAL_Y,
+              BALL_INITIAL_VELOCITY_X, BALL_INITIAL_VELOCITY_Y,
+              BALL_RADIUS);
 
     double previousTime = glfwGetTime();
 
@@ -244,6 +245,8 @@ int main() {
         previousTime = currentTime;
 
         handlePlayerInput(window, player, deltaTime);
+        ball.update(deltaTime, -FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
+                    -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT);
         glClearColor(0.03F, 0.12F, 0.05F, 1.0F);
         glClear(GL_COLOR_BUFFER_BIT);
 
