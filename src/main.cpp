@@ -1,3 +1,4 @@
+#include "entities/Ball.h"
 #include "entities/Player.h"
 
 #include <GLFW/glfw3.h>
@@ -13,6 +14,10 @@ constexpr float PLAYER_INITIAL_X = -20.0F;
 constexpr float PLAYER_INITIAL_Y = 0.0F;
 constexpr float PLAYER_SPEED = 12.0F;
 constexpr float PLAYER_RADIUS = 2.0F;
+constexpr float BALL_INITIAL_X = 0.0F;
+constexpr float BALL_INITIAL_Y = 0.0F;
+constexpr float BALL_INITIAL_VELOCITY = 0.0F;
+constexpr float BALL_RADIUS = 1.0F;
 constexpr float FIELD_HALF_HEIGHT = 34.0F;
 constexpr double PI = 3.14159265358979323846;
 
@@ -133,6 +138,26 @@ void drawPlayer(const Player& player) {
     glEnd();
 }
 
+void drawBall(const Ball& ball) {
+    constexpr int SEGMENTS = 48;
+
+    glColor3f(1.0F, 1.0F, 1.0F);
+    glBegin(GL_TRIANGLE_FAN);
+    glVertex2f(ball.getX(), ball.getY());
+
+    for (int i = 0; i <= SEGMENTS; ++i) {
+        const double angle = 2.0 * PI * i / SEGMENTS;
+        glVertex2d(ball.getX() + ball.getRadius() * std::cos(angle),
+                   ball.getY() + ball.getRadius() * std::sin(angle));
+    }
+
+    glEnd();
+
+    glColor3f(0.05F, 0.05F, 0.05F);
+    glLineWidth(1.5F);
+    drawCircle(ball.getX(), ball.getY(), ball.getRadius());
+}
+
 void drawField() {
     glColor3f(0.08F, 0.45F, 0.16F);
     glBegin(GL_QUADS);
@@ -207,6 +232,10 @@ int main() {
     Player player(PLAYER_INITIAL_X, PLAYER_INITIAL_Y,
                   PLAYER_SPEED, PLAYER_RADIUS, Team::Blue);
 
+    const Ball ball(BALL_INITIAL_X, BALL_INITIAL_Y,
+                    BALL_INITIAL_VELOCITY, BALL_INITIAL_VELOCITY,
+                    BALL_RADIUS);
+
     double previousTime = glfwGetTime();
 
     while (glfwWindowShouldClose(window) == GLFW_FALSE) {
@@ -221,6 +250,7 @@ int main() {
         glLoadIdentity();
         drawField();
         drawPlayer(player);
+        drawBall(ball);
 
         glfwSwapBuffers(window);
         glfwPollEvents();

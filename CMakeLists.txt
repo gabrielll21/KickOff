@@ -11,6 +11,7 @@ find_package(glfw3 3.3 REQUIRED)
 add_executable(KickOff
         src/main.cpp
         src/entities/Player.cpp
+        src/entities/Ball.cpp
 )
 
 target_link_libraries(KickOff PRIVATE glfw OpenGL::GL)
