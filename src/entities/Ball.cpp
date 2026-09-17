@@ -11,12 +11,16 @@ Ball::Ball(float x, float y, float velocityX, float velocityY, float radius)
 }
 
 void Ball::update(float deltaTime, float left, float right,
-                  float bottom, float top) {
+                  float bottom, float top, float goalDepth,
+                  float goalHalfHeight) {
     x_ += velocityX_ * deltaTime;
     y_ += velocityY_ * deltaTime;
 
-    const float minX = left + radius_;
-    const float maxX = right - radius_;
+    const bool insideGoalOpening =
+            y_ - radius_ >= -goalHalfHeight
+            && y_ + radius_ <= goalHalfHeight;
+    const float minX = (insideGoalOpening ? left - goalDepth : left) + radius_;
+    const float maxX = (insideGoalOpening ? right + goalDepth : right) - radius_;
     const float minY = bottom + radius_;
     const float maxY = top - radius_;
 

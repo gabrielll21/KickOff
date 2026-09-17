@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <iostream>
+#include <string>
 
 namespace {
 constexpr double WORLD_WIDTH = 120.0;
@@ -21,7 +22,16 @@ constexpr float BALL_INITIAL_VELOCITY_Y = 9.0F;
 constexpr float BALL_RADIUS = 1.0F;
 constexpr float BALL_IMPACT_SPEED = 20.0F;
 constexpr float FIELD_HALF_HEIGHT = 34.0F;
+constexpr float GOAL_DEPTH = 2.44F;
+constexpr float GOAL_HALF_HEIGHT = 3.66F;
 constexpr double PI = 3.14159265358979323846;
+
+struct Score {
+    int leftTeam = 0;
+    int rightTeam = 0;
+};
+
+enum class GoalSide { None, Left, Right };
 
 void configureProjection(GLFWwindow*, int framebufferWidth, int framebufferHeight) {
     if (framebufferWidth == 0 || framebufferHeight == 0) {
@@ -61,6 +71,98 @@ void drawRectangle(float left, float bottom, float right, float top) {
     glVertex2f(right, top);
     glVertex2f(left, top);
     glEnd();
+}
+
+void drawFilledRectangle(float left, float bottom, float right, float top) {
+    glBegin(GL_QUADS);
+    glVertex2f(left, bottom);
+    glVertex2f(right, bottom);
+    glVertex2f(right, top);
+    glVertex2f(left, top);
+    glEnd();
+}
+
+GoalSide detectGoal(const Ball& ball) {
+    const bool fitsBetweenPosts =
+            ball.getY() - ball.getRadius() >= -GOAL_HALF_HEIGHT
+            && ball.getY() + ball.getRadius() <= GOAL_HALF_HEIGHT;
+
+    if (!fitsBetweenPosts) {
+        return GoalSide::None;
+    }
+    if (ball.getX() + ball.getRadius() <= -FIELD_HALF_WIDTH
+        && ball.getX() - ball.getRadius() >= -FIELD_HALF_WIDTH - GOAL_DEPTH) {
+        return GoalSide::Left;
+    }
+    if (ball.getX() - ball.getRadius() >= FIELD_HALF_WIDTH
+        && ball.getX() + ball.getRadius() <= FIELD_HALF_WIDTH + GOAL_DEPTH) {
+        return GoalSide::Right;
+    }
+    return GoalSide::None;
+}
+
+void updateScore(const Ball& ball, Score& score, GoalSide& activeGoal) {
+    const GoalSide currentGoal = detectGoal(ball);
+    if (currentGoal != GoalSide::None && activeGoal == GoalSide::None) {
+        if (currentGoal == GoalSide::Left) {
+            ++score.rightTeam;
+        } else {
+            ++score.leftTeam;
+        }
+    }
+    activeGoal = currentGoal;
+}
+
+void drawDigit(int digit, float x, float y, float scale) {
+    static const bool SEGMENTS[10][7] = {
+        {true, true, true, false, true, true, true},
+        {false, false, true, false, false, true, false},
+        {true, false, true, true, true, false, true},
+        {true, false, true, true, false, true, true},
+        {false, true, true, true, false, true, false},
+        {true, true, false, true, false, true, true},
+        {true, true, false, true, true, true, true},
+        {true, false, true, false, false, true, false},
+        {true, true, true, true, true, true, true},
+        {true, true, true, true, false, true, true}
+    };
+    const float width = 3.0F * scale;
+    const float height = 5.0F * scale;
+    const float thickness = 0.45F * scale;
+
+    if (SEGMENTS[digit][0]) drawFilledRectangle(x, y + height - thickness, x + width, y + height);
+    if (SEGMENTS[digit][1]) drawFilledRectangle(x, y + height / 2.0F, x + thickness, y + height);
+    if (SEGMENTS[digit][2]) drawFilledRectangle(x + width - thickness, y + height / 2.0F, x + width, y + height);
+    if (SEGMENTS[digit][3]) drawFilledRectangle(x, y + height / 2.0F - thickness / 2.0F, x + width, y + height / 2.0F + thickness / 2.0F);
+    if (SEGMENTS[digit][4]) drawFilledRectangle(x, y, x + thickness, y + height / 2.0F);
+    if (SEGMENTS[digit][5]) drawFilledRectangle(x + width - thickness, y, x + width, y + height / 2.0F);
+    if (SEGMENTS[digit][6]) drawFilledRectangle(x, y, x + width, y + thickness);
+}
+
+float numberWidth(const std::string& text, float scale) {
+    return 3.0F * scale * static_cast<float>(text.size())
+           + 0.8F * scale * static_cast<float>(text.size() - 1U);
+}
+
+void drawNumber(int value, float left, float y, float scale) {
+    const std::string text = std::to_string(value);
+    float x = left;
+    for (char character : text) {
+        drawDigit(character - '0', x, y, scale);
+        x += 3.8F * scale;
+    }
+}
+
+void drawScore(const Score& score) {
+    constexpr float Y = 35.5F;
+    constexpr float SCALE = 0.75F;
+    const std::string leftText = std::to_string(score.leftTeam);
+
+    glColor3f(1.0F, 1.0F, 1.0F);
+    drawNumber(score.leftTeam, -2.5F - numberWidth(leftText, SCALE), Y, SCALE);
+    drawFilledRectangle(-0.45F, Y + 2.4F, 0.45F, Y + 3.3F);
+    drawFilledRectangle(-0.45F, Y + 0.8F, 0.45F, Y + 1.7F);
+    drawNumber(score.rightTeam, 2.5F, Y, SCALE);
 }
 
 void drawCircle(float centerX, float centerY, float radius) {
@@ -238,10 +340,10 @@ void drawField() {
     drawRectangle(FIELD_HALF_WIDTH - 5.5F, -9.16F,
                   FIELD_HALF_WIDTH, 9.16F);
 
-    drawRectangle(-FIELD_HALF_WIDTH - 2.44F, -3.66F,
-                  -FIELD_HALF_WIDTH, 3.66F);
-    drawRectangle(FIELD_HALF_WIDTH, -3.66F,
-                  FIELD_HALF_WIDTH + 2.44F, 3.66F);
+    drawRectangle(-FIELD_HALF_WIDTH - GOAL_DEPTH, -GOAL_HALF_HEIGHT,
+                  -FIELD_HALF_WIDTH, GOAL_HALF_HEIGHT);
+    drawRectangle(FIELD_HALF_WIDTH, -GOAL_HALF_HEIGHT,
+                  FIELD_HALF_WIDTH + GOAL_DEPTH, GOAL_HALF_HEIGHT);
 }
 } // namespace
 
@@ -274,6 +376,8 @@ int main() {
     Ball ball(BALL_INITIAL_X, BALL_INITIAL_Y,
               BALL_INITIAL_VELOCITY_X, BALL_INITIAL_VELOCITY_Y,
               BALL_RADIUS);
+    Score score;
+    GoalSide activeGoal = GoalSide::None;
 
     double previousTime = glfwGetTime();
 
@@ -285,7 +389,9 @@ int main() {
         handlePlayerInput(window, player, deltaTime);
         resolvePlayerBallCollision(player, ball);
         ball.update(deltaTime, -FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
-                    -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT);
+                    -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT,
+                    GOAL_DEPTH, GOAL_HALF_HEIGHT);
+        updateScore(ball, score, activeGoal);
         glClearColor(0.03F, 0.12F, 0.05F, 1.0F);
         glClear(GL_COLOR_BUFFER_BIT);
 
@@ -293,6 +399,7 @@ int main() {
         drawField();
         drawPlayer(player);
         drawBall(ball);
+        drawScore(score);
 
         glfwSwapBuffers(window);
         glfwPollEvents();

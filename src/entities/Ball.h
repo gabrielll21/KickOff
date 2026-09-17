@@ -6,7 +6,8 @@ public:
     Ball(float x, float y, float velocityX, float velocityY, float radius);
 
     void update(float deltaTime, float left, float right,
-                float bottom, float top);
+                float bottom, float top, float goalDepth,
+                float goalHalfHeight);
 
     float getX() const;
     float getY() const;
