@@ -24,6 +24,7 @@ constexpr float BALL_IMPACT_SPEED = 20.0F;
 constexpr float FIELD_HALF_HEIGHT = 34.0F;
 constexpr float GOAL_DEPTH = 2.44F;
 constexpr float GOAL_HALF_HEIGHT = 3.66F;
+constexpr float GOAL_STATE_DURATION = 2.0F;
 constexpr double PI = 3.14159265358979323846;
 
 struct Score {
@@ -32,6 +33,7 @@ struct Score {
 };
 
 enum class GoalSide { None, Left, Right };
+enum class MatchState { Playing, Goal };
 
 void configureProjection(GLFWwindow*, int framebufferWidth, int framebufferHeight) {
     if (framebufferWidth == 0 || framebufferHeight == 0) {
@@ -101,16 +103,17 @@ GoalSide detectGoal(const Ball& ball) {
     return GoalSide::None;
 }
 
-void updateScore(const Ball& ball, Score& score, GoalSide& activeGoal) {
-    const GoalSide currentGoal = detectGoal(ball);
-    if (currentGoal != GoalSide::None && activeGoal == GoalSide::None) {
-        if (currentGoal == GoalSide::Left) {
+bool updateScore(const Ball& ball, Score& score) {
+    const GoalSide goal = detectGoal(ball);
+    if (goal != GoalSide::None) {
+        if (goal == GoalSide::Left) {
             ++score.rightTeam;
         } else {
             ++score.leftTeam;
         }
+        return true;
     }
-    activeGoal = currentGoal;
+    return false;
 }
 
 void drawDigit(int digit, float x, float y, float scale) {
@@ -163,6 +166,47 @@ void drawScore(const Score& score) {
     drawFilledRectangle(-0.45F, Y + 2.4F, 0.45F, Y + 3.3F);
     drawFilledRectangle(-0.45F, Y + 0.8F, 0.45F, Y + 1.7F);
     drawNumber(score.rightTeam, 2.5F, Y, SCALE);
+}
+
+void drawGoalMessage() {
+    constexpr float X = -17.0F;
+    constexpr float Y = -4.0F;
+    constexpr float WIDTH = 5.0F;
+    constexpr float HEIGHT = 8.0F;
+    constexpr float THICKNESS = 0.8F;
+    constexpr float STEP = 7.0F;
+
+    glColor3f(1.0F, 0.85F, 0.1F);
+
+    drawFilledRectangle(X, Y, X + THICKNESS, Y + HEIGHT);
+    drawFilledRectangle(X, Y + HEIGHT - THICKNESS, X + WIDTH, Y + HEIGHT);
+    drawFilledRectangle(X, Y, X + WIDTH, Y + THICKNESS);
+    drawFilledRectangle(X + WIDTH - THICKNESS, Y, X + WIDTH, Y + HEIGHT / 2.0F);
+    drawFilledRectangle(X + WIDTH / 2.0F, Y + HEIGHT / 2.0F - THICKNESS / 2.0F,
+                        X + WIDTH, Y + HEIGHT / 2.0F + THICKNESS / 2.0F);
+
+    const float oX = X + STEP;
+    drawFilledRectangle(oX, Y, oX + THICKNESS, Y + HEIGHT);
+    drawFilledRectangle(oX + WIDTH - THICKNESS, Y, oX + WIDTH, Y + HEIGHT);
+    drawFilledRectangle(oX, Y + HEIGHT - THICKNESS, oX + WIDTH, Y + HEIGHT);
+    drawFilledRectangle(oX, Y, oX + WIDTH, Y + THICKNESS);
+
+    const float aX = X + 2.0F * STEP;
+    drawFilledRectangle(aX, Y, aX + THICKNESS, Y + HEIGHT);
+    drawFilledRectangle(aX + WIDTH - THICKNESS, Y, aX + WIDTH, Y + HEIGHT);
+    drawFilledRectangle(aX, Y + HEIGHT - THICKNESS, aX + WIDTH, Y + HEIGHT);
+    drawFilledRectangle(aX, Y + HEIGHT / 2.0F - THICKNESS / 2.0F,
+                        aX + WIDTH, Y + HEIGHT / 2.0F + THICKNESS / 2.0F);
+
+    const float lX = X + 3.0F * STEP;
+    drawFilledRectangle(lX, Y, lX + THICKNESS, Y + HEIGHT);
+    drawFilledRectangle(lX, Y, lX + WIDTH, Y + THICKNESS);
+
+    const float exclamationX = X + 4.0F * STEP;
+    drawFilledRectangle(exclamationX, Y + 2.0F,
+                        exclamationX + THICKNESS, Y + HEIGHT);
+    drawFilledRectangle(exclamationX, Y,
+                        exclamationX + THICKNESS, Y + THICKNESS);
 }
 
 void drawCircle(float centerX, float centerY, float radius) {
@@ -256,6 +300,25 @@ void resolvePlayerBallCollision(const Player& player, Ball& ball) {
     ball.setY(player.getY() + directionY * minimumDistance);
     ball.setVelocityX(directionX * BALL_IMPACT_SPEED);
     ball.setVelocityY(directionY * BALL_IMPACT_SPEED);
+}
+
+bool updatePlaying(GLFWwindow* window, Player& player,
+                   Ball& ball, Score& score, float deltaTime) {
+    handlePlayerInput(window, player, deltaTime);
+    resolvePlayerBallCollision(player, ball);
+    ball.update(deltaTime, -FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
+                -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT,
+                GOAL_DEPTH, GOAL_HALF_HEIGHT);
+    return updateScore(ball, score);
+}
+
+void resetPlay(Player& player, Ball& ball) {
+    player.setX(PLAYER_INITIAL_X);
+    player.setY(PLAYER_INITIAL_Y);
+    ball.setX(BALL_INITIAL_X);
+    ball.setY(BALL_INITIAL_Y);
+    ball.setVelocityX(BALL_INITIAL_VELOCITY_X);
+    ball.setVelocityY(BALL_INITIAL_VELOCITY_Y);
 }
 
 void drawPlayer(const Player& player) {
@@ -377,7 +440,8 @@ int main() {
               BALL_INITIAL_VELOCITY_X, BALL_INITIAL_VELOCITY_Y,
               BALL_RADIUS);
     Score score;
-    GoalSide activeGoal = GoalSide::None;
+    MatchState matchState = MatchState::Playing;
+    float goalStateElapsed = 0.0F;
 
     double previousTime = glfwGetTime();
 
@@ -386,12 +450,18 @@ int main() {
         const float deltaTime = static_cast<float>(currentTime - previousTime);
         previousTime = currentTime;
 
-        handlePlayerInput(window, player, deltaTime);
-        resolvePlayerBallCollision(player, ball);
-        ball.update(deltaTime, -FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
-                    -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT,
-                    GOAL_DEPTH, GOAL_HALF_HEIGHT);
-        updateScore(ball, score, activeGoal);
+        if (matchState == MatchState::Playing) {
+            if (updatePlaying(window, player, ball, score, deltaTime)) {
+                matchState = MatchState::Goal;
+                goalStateElapsed = 0.0F;
+            }
+        } else {
+            goalStateElapsed += deltaTime;
+            if (goalStateElapsed >= GOAL_STATE_DURATION) {
+                resetPlay(player, ball);
+                matchState = MatchState::Playing;
+            }
+        }
         glClearColor(0.03F, 0.12F, 0.05F, 1.0F);
         glClear(GL_COLOR_BUFFER_BIT);
 
@@ -400,6 +470,9 @@ int main() {
         drawPlayer(player);
         drawBall(ball);
         drawScore(score);
+        if (matchState == MatchState::Goal) {
+            drawGoalMessage();
+        }
 
         glfwSwapBuffers(window);
         glfwPollEvents();
