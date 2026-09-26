@@ -4,6 +4,7 @@
 
 #include <GLFW/glfw3.h>
 
+#include <array>
 #include <cmath>
 #include <iostream>
 #include <string>
@@ -12,8 +13,6 @@ namespace {
 constexpr double WORLD_WIDTH = 120.0;
 constexpr double WORLD_HEIGHT = 80.0;
 constexpr float FIELD_HALF_WIDTH = 52.5F;
-constexpr float PLAYER_INITIAL_X = -20.0F;
-constexpr float PLAYER_INITIAL_Y = 0.0F;
 constexpr float PLAYER_SPEED = 12.0F;
 constexpr float PLAYER_RADIUS = 2.0F;
 constexpr float BALL_INITIAL_X = 0.0F;
@@ -27,6 +26,22 @@ constexpr float GOAL_DEPTH = 2.44F;
 constexpr float GOAL_HALF_HEIGHT = 3.66F;
 constexpr float GOAL_STATE_DURATION = 2.0F;
 constexpr double PI = 3.14159265358979323846;
+
+struct PlayerPosition {
+    float x;
+    float y;
+};
+
+constexpr std::array<PlayerPosition, Team::MAX_PLAYERS> BLUE_INITIAL_POSITIONS{{
+    {-25.0F, 0.0F},
+    {-35.0F, 12.0F},
+    {-35.0F, -12.0F}
+}};
+constexpr std::array<PlayerPosition, Team::MAX_PLAYERS> RED_INITIAL_POSITIONS{{
+    {25.0F, 0.0F},
+    {35.0F, 12.0F},
+    {35.0F, -12.0F}
+}};
 
 enum class GoalSide { None, Left, Right };
 enum class MatchState { Playing, Goal };
@@ -309,9 +324,18 @@ bool updatePlaying(GLFWwindow* window, Player& player,
     return updateScore(ball, leftTeam, rightTeam);
 }
 
-void resetPlay(Player& player, Ball& ball) {
-    player.setX(PLAYER_INITIAL_X);
-    player.setY(PLAYER_INITIAL_Y);
+void resetPlayers(Team& team,
+                  const std::array<PlayerPosition, Team::MAX_PLAYERS>& positions) {
+    const auto& players = team.getPlayers();
+    for (std::size_t index = 0; index < team.getPlayerCount(); ++index) {
+        players[index]->setX(positions[index].x);
+        players[index]->setY(positions[index].y);
+    }
+}
+
+void resetPlay(Team& blueTeam, Team& redTeam, Ball& ball) {
+    resetPlayers(blueTeam, BLUE_INITIAL_POSITIONS);
+    resetPlayers(redTeam, RED_INITIAL_POSITIONS);
     ball.setX(BALL_INITIAL_X);
     ball.setY(BALL_INITIAL_Y);
     ball.setVelocityX(BALL_INITIAL_VELOCITY_X);
@@ -337,6 +361,13 @@ void drawPlayer(const Player& player) {
     }
 
     glEnd();
+}
+
+void drawTeam(const Team& team) {
+    const auto& players = team.getPlayers();
+    for (std::size_t index = 0; index < team.getPlayerCount(); ++index) {
+        drawPlayer(*players[index]);
+    }
 }
 
 void drawBall(const Ball& ball) {
@@ -430,14 +461,35 @@ int main() {
     glfwGetFramebufferSize(window, &framebufferWidth, &framebufferHeight);
     configureProjection(window, framebufferWidth, framebufferHeight);
 
-    Player player(PLAYER_INITIAL_X, PLAYER_INITIAL_Y,
-                  PLAYER_SPEED, PLAYER_RADIUS, TeamId::Blue);
+    std::array<Player, Team::MAX_PLAYERS> bluePlayers{{
+        Player(BLUE_INITIAL_POSITIONS[0].x, BLUE_INITIAL_POSITIONS[0].y,
+               PLAYER_SPEED, PLAYER_RADIUS, TeamId::Blue),
+        Player(BLUE_INITIAL_POSITIONS[1].x, BLUE_INITIAL_POSITIONS[1].y,
+               PLAYER_SPEED, PLAYER_RADIUS, TeamId::Blue),
+        Player(BLUE_INITIAL_POSITIONS[2].x, BLUE_INITIAL_POSITIONS[2].y,
+               PLAYER_SPEED, PLAYER_RADIUS, TeamId::Blue)
+    }};
+    std::array<Player, Team::MAX_PLAYERS> redPlayers{{
+        Player(RED_INITIAL_POSITIONS[0].x, RED_INITIAL_POSITIONS[0].y,
+               PLAYER_SPEED, PLAYER_RADIUS, TeamId::Red),
+        Player(RED_INITIAL_POSITIONS[1].x, RED_INITIAL_POSITIONS[1].y,
+               PLAYER_SPEED, PLAYER_RADIUS, TeamId::Red),
+        Player(RED_INITIAL_POSITIONS[2].x, RED_INITIAL_POSITIONS[2].y,
+               PLAYER_SPEED, PLAYER_RADIUS, TeamId::Red)
+    }};
 
     Ball ball(BALL_INITIAL_X, BALL_INITIAL_Y,
               BALL_INITIAL_VELOCITY_X, BALL_INITIAL_VELOCITY_Y,
               BALL_RADIUS);
-    Team leftTeam(TeamId::Blue, "Blue");
-    Team rightTeam(TeamId::Red, "Red");
+    Team blueTeam(TeamId::Blue, "Blue");
+    Team redTeam(TeamId::Red, "Red");
+    for (Player& player : bluePlayers) {
+        blueTeam.addPlayer(player);
+    }
+    for (Player& player : redPlayers) {
+        redTeam.addPlayer(player);
+    }
+    Player& controlledPlayer = bluePlayers[0];
     MatchState matchState = MatchState::Playing;
     float goalStateElapsed = 0.0F;
 
@@ -449,15 +501,15 @@ int main() {
         previousTime = currentTime;
 
         if (matchState == MatchState::Playing) {
-            if (updatePlaying(window, player, ball,
-                              leftTeam, rightTeam, deltaTime)) {
+            if (updatePlaying(window, controlledPlayer, ball,
+                              blueTeam, redTeam, deltaTime)) {
                 matchState = MatchState::Goal;
                 goalStateElapsed = 0.0F;
             }
         } else {
             goalStateElapsed += deltaTime;
             if (goalStateElapsed >= GOAL_STATE_DURATION) {
-                resetPlay(player, ball);
+                resetPlay(blueTeam, redTeam, ball);
                 matchState = MatchState::Playing;
             }
         }
@@ -466,9 +518,10 @@ int main() {
 
         glLoadIdentity();
         drawField();
-        drawPlayer(player);
+        drawTeam(blueTeam);
+        drawTeam(redTeam);
         drawBall(ball);
-        drawScore(leftTeam, rightTeam);
+        drawScore(blueTeam, redTeam);
         if (matchState == MatchState::Goal) {
             drawGoalMessage();
         }
