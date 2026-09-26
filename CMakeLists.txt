@@ -12,6 +12,7 @@ add_executable(KickOff
         src/main.cpp
         src/entities/Player.cpp
         src/entities/Ball.cpp
+        src/entities/Team.cpp
 )
 
 target_link_libraries(KickOff PRIVATE glfw OpenGL::GL)

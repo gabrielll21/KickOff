@@ -1,5 +1,6 @@
 #include "entities/Ball.h"
 #include "entities/Player.h"
+#include "entities/Team.h"
 
 #include <GLFW/glfw3.h>
 
@@ -26,11 +27,6 @@ constexpr float GOAL_DEPTH = 2.44F;
 constexpr float GOAL_HALF_HEIGHT = 3.66F;
 constexpr float GOAL_STATE_DURATION = 2.0F;
 constexpr double PI = 3.14159265358979323846;
-
-struct Score {
-    int leftTeam = 0;
-    int rightTeam = 0;
-};
 
 enum class GoalSide { None, Left, Right };
 enum class MatchState { Playing, Goal };
@@ -103,13 +99,13 @@ GoalSide detectGoal(const Ball& ball) {
     return GoalSide::None;
 }
 
-bool updateScore(const Ball& ball, Score& score) {
+bool updateScore(const Ball& ball, Team& leftTeam, Team& rightTeam) {
     const GoalSide goal = detectGoal(ball);
     if (goal != GoalSide::None) {
         if (goal == GoalSide::Left) {
-            ++score.rightTeam;
+            rightTeam.addGoal();
         } else {
-            ++score.leftTeam;
+            leftTeam.addGoal();
         }
         return true;
     }
@@ -156,16 +152,16 @@ void drawNumber(int value, float left, float y, float scale) {
     }
 }
 
-void drawScore(const Score& score) {
+void drawScore(const Team& leftTeam, const Team& rightTeam) {
     constexpr float Y = 35.5F;
     constexpr float SCALE = 0.75F;
-    const std::string leftText = std::to_string(score.leftTeam);
+    const std::string leftText = std::to_string(leftTeam.getScore());
 
     glColor3f(1.0F, 1.0F, 1.0F);
-    drawNumber(score.leftTeam, -2.5F - numberWidth(leftText, SCALE), Y, SCALE);
+    drawNumber(leftTeam.getScore(), -2.5F - numberWidth(leftText, SCALE), Y, SCALE);
     drawFilledRectangle(-0.45F, Y + 2.4F, 0.45F, Y + 3.3F);
     drawFilledRectangle(-0.45F, Y + 0.8F, 0.45F, Y + 1.7F);
-    drawNumber(score.rightTeam, 2.5F, Y, SCALE);
+    drawNumber(rightTeam.getScore(), 2.5F, Y, SCALE);
 }
 
 void drawGoalMessage() {
@@ -303,13 +299,14 @@ void resolvePlayerBallCollision(const Player& player, Ball& ball) {
 }
 
 bool updatePlaying(GLFWwindow* window, Player& player,
-                   Ball& ball, Score& score, float deltaTime) {
+                   Ball& ball, Team& leftTeam, Team& rightTeam,
+                   float deltaTime) {
     handlePlayerInput(window, player, deltaTime);
     resolvePlayerBallCollision(player, ball);
     ball.update(deltaTime, -FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
                 -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT,
                 GOAL_DEPTH, GOAL_HALF_HEIGHT);
-    return updateScore(ball, score);
+    return updateScore(ball, leftTeam, rightTeam);
 }
 
 void resetPlay(Player& player, Ball& ball) {
@@ -324,7 +321,7 @@ void resetPlay(Player& player, Ball& ball) {
 void drawPlayer(const Player& player) {
     constexpr int SEGMENTS = 48;
 
-    if (player.getTeam() == Team::Blue) {
+    if (player.getTeam() == TeamId::Blue) {
         glColor3f(0.1F, 0.3F, 0.95F);
     } else {
         glColor3f(0.9F, 0.15F, 0.15F);
@@ -434,12 +431,13 @@ int main() {
     configureProjection(window, framebufferWidth, framebufferHeight);
 
     Player player(PLAYER_INITIAL_X, PLAYER_INITIAL_Y,
-                  PLAYER_SPEED, PLAYER_RADIUS, Team::Blue);
+                  PLAYER_SPEED, PLAYER_RADIUS, TeamId::Blue);
 
     Ball ball(BALL_INITIAL_X, BALL_INITIAL_Y,
               BALL_INITIAL_VELOCITY_X, BALL_INITIAL_VELOCITY_Y,
               BALL_RADIUS);
-    Score score;
+    Team leftTeam(TeamId::Blue, "Blue");
+    Team rightTeam(TeamId::Red, "Red");
     MatchState matchState = MatchState::Playing;
     float goalStateElapsed = 0.0F;
 
@@ -451,7 +449,8 @@ int main() {
         previousTime = currentTime;
 
         if (matchState == MatchState::Playing) {
-            if (updatePlaying(window, player, ball, score, deltaTime)) {
+            if (updatePlaying(window, player, ball,
+                              leftTeam, rightTeam, deltaTime)) {
                 matchState = MatchState::Goal;
                 goalStateElapsed = 0.0F;
             }
@@ -469,7 +468,7 @@ int main() {
         drawField();
         drawPlayer(player);
         drawBall(ball);
-        drawScore(score);
+        drawScore(leftTeam, rightTeam);
         if (matchState == MatchState::Goal) {
             drawGoalMessage();
         }

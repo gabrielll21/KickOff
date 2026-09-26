@@ -1,14 +1,11 @@
 #ifndef KICKOFF_PLAYER_H
 #define KICKOFF_PLAYER_H
 
-enum class Team {
-    Blue,
-    Red
-};
+#include "Team.h"
 
 class Player {
 public:
-    Player(float x, float y, float speed, float radius, Team team);
+    Player(float x, float y, float speed, float radius, TeamId team);
 
     void move(float directionX, float directionY, float deltaTime);
     void keepInside(float left, float right, float bottom, float top);
@@ -17,20 +14,20 @@ public:
     float getY() const;
     float getSpeed() const;
     float getRadius() const;
-    Team getTeam() const;
+    TeamId getTeam() const;
 
     void setX(float x);
     void setY(float y);
     void setSpeed(float speed);
     void setRadius(float radius);
-    void setTeam(Team team);
+    void setTeam(TeamId team);
 
 private:
     float x_;
     float y_;
     float speed_;
     float radius_;
-    Team team_;
+    TeamId team_;
 };
 
 #endif

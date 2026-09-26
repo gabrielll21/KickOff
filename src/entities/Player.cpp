@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-Player::Player(float x, float y, float speed, float radius, Team team)
+Player::Player(float x, float y, float speed, float radius, TeamId team)
         : x_(x), y_(y), speed_(speed), radius_(radius), team_(team) {
 }
 
@@ -32,7 +32,7 @@ float Player::getRadius() const {
     return radius_;
 }
 
-Team Player::getTeam() const {
+TeamId Player::getTeam() const {
     return team_;
 }
 
@@ -52,6 +52,6 @@ void Player::setRadius(float radius) {
     radius_ = radius;
 }
 
-void Player::setTeam(Team team) {
+void Player::setTeam(TeamId team) {
     team_ = team;
 }
