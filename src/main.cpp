@@ -23,6 +23,7 @@ constexpr float BALL_INITIAL_VELOCITY_Y = 9.0F;
 constexpr float BALL_RADIUS = 1.0F;
 constexpr float BALL_IMPACT_SPEED = 20.0F;
 constexpr float BALL_KICK_SPEED = 35.0F;
+constexpr float BALL_PASS_SPEED = 25.0F;
 constexpr float FIELD_HALF_HEIGHT = 34.0F;
 constexpr float GOAL_DEPTH = 2.44F;
 constexpr float GOAL_HALF_HEIGHT = 3.66F;
@@ -41,13 +42,22 @@ struct TeamControls {
     int rightKey;
     int switchKey;
     int kickKey;
+    int passKey;
 };
 
 struct TeamControlState {
     std::size_t controlledPlayerIndex;
     bool switchKeyWasPressed;
     bool kickKeyWasPressed = false;
-    const Player* kickContactPlayer = nullptr;
+    bool passKeyWasPressed = false;
+    const Player* initialContactPlayer = nullptr;
+};
+
+struct BallAction {
+    Player* origin = nullptr;
+    Player* receiver = nullptr;
+    std::size_t receiverIndex = 0U;
+    float distanceSquared = 0.0F;
 };
 
 constexpr std::array<PlayerPosition, Team::MAX_PLAYERS> BLUE_INITIAL_POSITIONS{{
@@ -61,11 +71,12 @@ constexpr std::array<PlayerPosition, Team::MAX_PLAYERS> RED_INITIAL_POSITIONS{{
     {35.0F, -12.0F}
 }};
 constexpr TeamControls BLUE_CONTROLS{
-    GLFW_KEY_W, GLFW_KEY_S, GLFW_KEY_A, GLFW_KEY_D, GLFW_KEY_TAB, GLFW_KEY_SPACE
+    GLFW_KEY_W, GLFW_KEY_S, GLFW_KEY_A, GLFW_KEY_D, GLFW_KEY_TAB, GLFW_KEY_SPACE,
+    GLFW_KEY_Q
 };
 constexpr TeamControls RED_CONTROLS{
     GLFW_KEY_UP, GLFW_KEY_DOWN, GLFW_KEY_LEFT, GLFW_KEY_RIGHT, GLFW_KEY_ENTER,
-    GLFW_KEY_RIGHT_SHIFT
+    GLFW_KEY_RIGHT_SHIFT, GLFW_KEY_RIGHT_CONTROL
 };
 
 enum class GoalSide { None, Left, Right };
@@ -365,12 +376,13 @@ void syncTeamInputState(GLFWwindow* window, TeamControlState& state,
                         const TeamControls& controls) {
     state.switchKeyWasPressed = isKeyPressed(window, controls.switchKey);
     state.kickKeyWasPressed = isKeyPressed(window, controls.kickKey);
-    state.kickContactPlayer = nullptr;
+    state.passKeyWasPressed = isKeyPressed(window, controls.passKey);
+    state.initialContactPlayer = nullptr;
 }
 
 void resetControlledPlayer(TeamControlState& state) {
     state.controlledPlayerIndex = 0U;
-    state.kickContactPlayer = nullptr;
+    state.initialContactPlayer = nullptr;
 }
 
 float kickDistanceSquared(const Player& player, const Ball& ball) {
@@ -384,17 +396,69 @@ bool canKick(const Player& player, const Ball& ball) {
     return kickDistanceSquared(player, ball) <= range * range;
 }
 
-Player* chooseKicker(Player& blue, bool blueRequested,
-                     Player& red, bool redRequested, const Ball& ball) {
-    const bool blueValid = blueRequested && canKick(blue, ball);
-    const bool redValid = redRequested && canKick(red, ball);
-    if (blueValid && redValid) {
-        const float blueDistance = kickDistanceSquared(blue, ball);
-        const float redDistance = kickDistanceSquared(red, ball);
-        if (blueDistance == redDistance) return nullptr;
-        return blueDistance < redDistance ? &blue : &red;
+std::size_t findPassReceiverIndex(const Team& team, std::size_t originIndex) {
+    const Player& origin = *team.getPlayers()[originIndex];
+    std::size_t nearest = team.getPlayerCount();
+    float nearestDistance = 0.0F;
+    for (std::size_t index = 0; index < team.getPlayerCount(); ++index) {
+        if (index == originIndex) continue;
+        const Player& candidate = *team.getPlayers()[index];
+        const float dx = candidate.getX() - origin.getX();
+        const float dy = candidate.getY() - origin.getY();
+        const float distance = dx * dx + dy * dy;
+        // Ascending registration order keeps the lowest index on a tie.
+        if (nearest == team.getPlayerCount() || distance < nearestDistance) {
+            nearest = index;
+            nearestDistance = distance;
+        }
     }
-    return blueValid ? &blue : (redValid ? &red : nullptr);
+    return nearest;
+}
+
+bool hasPassDirection(const Player& receiver, const Ball& ball) {
+    return kickDistanceSquared(receiver, ball) > 0.0F;
+}
+
+BallAction prepareBallAction(Team& team, const TeamControlState& state,
+                             const Ball& ball, bool kickRequested, bool passRequested) {
+    if (team.getPlayerCount() == 0U || (!kickRequested && !passRequested)) return {};
+    Player& origin = getControlledPlayer(team, state);
+    if (!canKick(origin, ball)) return {};
+    BallAction action;
+    action.origin = &origin;
+    action.distanceSquared = kickDistanceSquared(origin, ball);
+    if (kickRequested) return action;
+    const std::size_t receiverIndex = findPassReceiverIndex(team, state.controlledPlayerIndex);
+    if (receiverIndex == team.getPlayerCount()) return {};
+    action.receiver = team.getPlayers()[receiverIndex];
+    action.receiverIndex = receiverIndex;
+    if (!hasPassDirection(*action.receiver, ball)) return {};
+    return action;
+}
+
+BallAction chooseBallAction(const BallAction& blue, const BallAction& red, const Ball& ball) {
+    // Contact correction may have moved the ball onto a receiver. An invalid
+    // action must not block the opponent's valid action or change selection.
+    const bool blueValid = blue.origin != nullptr
+            && (blue.receiver == nullptr || hasPassDirection(*blue.receiver, ball));
+    const bool redValid = red.origin != nullptr
+            && (red.receiver == nullptr || hasPassDirection(*red.receiver, ball));
+    if (blueValid && redValid) {
+        if (blue.distanceSquared == red.distanceSquared) return {};
+        return blue.distanceSquared < red.distanceSquared ? blue : red;
+    }
+    return blueValid ? blue : (redValid ? red : BallAction{});
+}
+
+bool applyPass(const BallAction& action, TeamControlState& state, Ball& ball) {
+    const float dx = action.receiver->getX() - ball.getX();
+    const float dy = action.receiver->getY() - ball.getY();
+    const float length = std::hypot(dx, dy);
+    if (length == 0.0F) return false;
+    ball.setVelocityX(dx / length * BALL_PASS_SPEED);
+    ball.setVelocityY(dy / length * BALL_PASS_SPEED);
+    state.controlledPlayerIndex = action.receiverIndex;
+    return true;
 }
 
 void applyKick(GLFWwindow* window, const Player& player,
@@ -407,17 +471,17 @@ void applyKick(GLFWwindow* window, const Player& player,
     ball.setVelocityY(direction.y * BALL_KICK_SPEED);
 }
 
-const Player* protectedKickContact(TeamControlState& state, const Ball& ball) {
+const Player* protectedInitialContact(TeamControlState& state, const Ball& ball) {
     // Protect only the originating player's initial reach interaction, not
     // other players or later return contacts. Separation remains enabled.
-    if (state.kickContactPlayer != nullptr) {
-        const float range = state.kickContactPlayer->getRadius() + ball.getRadius()
+    if (state.initialContactPlayer != nullptr) {
+        const float range = state.initialContactPlayer->getRadius() + ball.getRadius()
                             + 0.5F + 0.0001F;
-        if (kickDistanceSquared(*state.kickContactPlayer, ball) > range * range) {
-            state.kickContactPlayer = nullptr;
+        if (kickDistanceSquared(*state.initialContactPlayer, ball) > range * range) {
+            state.initialContactPlayer = nullptr;
         }
     }
-    return state.kickContactPlayer;
+    return state.initialContactPlayer;
 }
 
 bool resolvePlayerBallCollision(const Player& player, Ball& ball,
@@ -729,6 +793,10 @@ bool updatePlaying(GLFWwindow* window,
                                           blueControlState.kickKeyWasPressed);
     const bool redKick = consumeKeyPress(isKeyPressed(window, RED_CONTROLS.kickKey),
                                          redControlState.kickKeyWasPressed);
+    const bool bluePass = consumeKeyPress(isKeyPressed(window, BLUE_CONTROLS.passKey),
+                                          blueControlState.passKeyWasPressed);
+    const bool redPass = consumeKeyPress(isKeyPressed(window, RED_CONTROLS.passKey),
+                                         redControlState.passKeyWasPressed);
     // Bound travel per step, including the existing impact speed, to avoid
     // skipping a player during an ordinary frame or a temporary frame delay.
     const float maximumSpeed = std::max(BALL_KICK_SPEED,
@@ -745,22 +813,23 @@ bool updatePlaying(GLFWwindow* window,
                         RED_CONTROLS, ball, stepTime);
         resolvePlayerCollisions(blueTeam, blueControlState, bluePrevious,
                                 redTeam, redControlState, redPrevious);
-        Player* kicker = step == 0 ? chooseKicker(
-                getControlledPlayer(blueTeam, blueControlState), blueKick,
-                getControlledPlayer(redTeam, redControlState), redKick, ball) : nullptr;
+        const BallAction blueAction = step == 0 ? prepareBallAction(
+                blueTeam, blueControlState, ball, blueKick, bluePass) : BallAction{};
+        const BallAction redAction = step == 0 ? prepareBallAction(
+                redTeam, redControlState, ball, redKick, redPass) : BallAction{};
         const float velocityBeforeX = ball.getVelocityX();
         const float velocityBeforeY = ball.getVelocityY();
         ball.update(stepTime, -FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
                     -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT, GOAL_DEPTH, GOAL_HALF_HEIGHT);
 
         // A wall rebound ends the initial contact protection: return contacts
-        // with the kicker are legitimate collisions again.
+        // with the origin player are legitimate collisions again.
         if (ball.getVelocityX() != velocityBeforeX || ball.getVelocityY() != velocityBeforeY) {
-            blueControlState.kickContactPlayer = nullptr;
-            redControlState.kickContactPlayer = nullptr;
+            blueControlState.initialContactPlayer = nullptr;
+            redControlState.initialContactPlayer = nullptr;
         }
-        const Player* protectedPlayer = protectedKickContact(blueControlState, ball);
-        const Player* redProtected = protectedKickContact(redControlState, ball);
+        const Player* protectedPlayer = protectedInitialContact(blueControlState, ball);
+        const Player* redProtected = protectedInitialContact(redControlState, ball);
         if (protectedPlayer == nullptr) protectedPlayer = redProtected;
 
         // Fixed Blue/Red, registration order. At most one impulse per step;
@@ -772,8 +841,8 @@ bool updatePlaying(GLFWwindow* window,
             resolveTeamBallCollisions(redTeam, redPrevious, ball, stepTime,
                                       impulseApplied, protectedPlayer);
             if (pass == 0 && impulseApplied) {
-                blueControlState.kickContactPlayer = nullptr;
-                redControlState.kickContactPlayer = nullptr;
+                blueControlState.initialContactPlayer = nullptr;
+                redControlState.initialContactPlayer = nullptr;
             }
             impulseApplied = true;
             const float contactVelocityX = ball.getVelocityX();
@@ -781,8 +850,8 @@ bool updatePlaying(GLFWwindow* window,
             ball.update(0.0F, -FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
                         -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT, GOAL_DEPTH, GOAL_HALF_HEIGHT);
             if (ball.getVelocityX() != contactVelocityX || ball.getVelocityY() != contactVelocityY) {
-                blueControlState.kickContactPlayer = nullptr;
-                redControlState.kickContactPlayer = nullptr;
+                blueControlState.initialContactPlayer = nullptr;
+                redControlState.initialContactPlayer = nullptr;
                 protectedPlayer = nullptr;
             }
             if (isBallPositionClear(blueTeam, redTeam, ball)) {
@@ -791,12 +860,22 @@ bool updatePlaying(GLFWwindow* window,
         }
         releaseTrappedBall(blueTeam, redTeam, ball);
         // Apply after this step's contact resolution so the originating
-        // contact cannot overwrite 35 with the normal impact speed of 20.
-        if (kicker != nullptr) {
-            const bool blue = kicker->getTeam() == TeamId::Blue;
-            applyKick(window, *kicker, blue ? BLUE_CONTROLS : RED_CONTROLS, ball);
-            blueControlState.kickContactPlayer = blue ? kicker : nullptr;
-            redControlState.kickContactPlayer = blue ? nullptr : kicker;
+        // contact cannot overwrite a kick (35) or pass (25) with impact speed 20.
+        const BallAction action = chooseBallAction(blueAction, redAction, ball);
+        if (action.origin != nullptr) {
+            const bool blue = action.origin->getTeam() == TeamId::Blue;
+            TeamControlState& state = blue ? blueControlState : redControlState;
+            bool executed = true;
+            if (action.receiver != nullptr) {
+                executed = applyPass(action, state, ball);
+            } else {
+                applyKick(window, *action.origin, blue ? BLUE_CONTROLS : RED_CONTROLS, ball);
+            }
+            if (executed) {
+                // Keep the origin's identity even after a pass changes selection.
+                blueControlState.initialContactPlayer = blue ? action.origin : nullptr;
+                redControlState.initialContactPlayer = blue ? nullptr : action.origin;
+            }
         }
         if (updateScore(ball, blueTeam, redTeam)) {
             return true;
