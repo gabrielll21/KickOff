@@ -29,6 +29,18 @@ constexpr float DEFENSIVE_BASE_WEIGHT = 0.4F;
 constexpr float MARKING_TARGET_WEIGHT = 0.6F;
 constexpr float MARKING_SWITCH_MARGIN = 2.0F;
 constexpr std::size_t NO_MARKING_TARGET = Team::MAX_PLAYERS;
+constexpr float SUPPORT_LATERAL_OFFSET = 4.0F;
+constexpr float SUPPORT_FORWARD_OFFSET = 3.0F;
+constexpr float PASS_LANE_CLEARANCE = 4.0F;
+constexpr float SUPPORT_MIN_SPACING = 8.0F;
+constexpr float SUPPORT_BASE_WEIGHT = 1.0F;
+constexpr float SUPPORT_LANE_WEIGHT = 3.0F;
+constexpr float SUPPORT_SPACING_WEIGHT = 2.0F;
+constexpr float SUPPORT_SELECTED_WEIGHT = 2.0F;
+constexpr float SUPPORT_SWITCH_MARGIN = 2.0F;
+constexpr float SUPPORT_POSITION_EPSILON = 0.0001F;
+constexpr std::size_t SUPPORT_CANDIDATE_COUNT = 9U;
+constexpr std::size_t NO_SUPPORT_CANDIDATE = SUPPORT_CANDIDATE_COUNT;
 constexpr float PLAYER_RADIUS = 2.0F;
 constexpr float BALL_INITIAL_X = 0.0F;
 constexpr float BALL_INITIAL_Y = 0.0F;
@@ -66,6 +78,18 @@ struct DefensiveMarking {
     }};
 };
 
+struct OffensiveSupport {
+    std::size_t selectedIndex = Team::MAX_PLAYERS;
+    std::array<std::size_t, Team::MAX_PLAYERS> candidates{{
+        NO_SUPPORT_CANDIDATE, NO_SUPPORT_CANDIDATE, NO_SUPPORT_CANDIDATE
+    }};
+};
+
+struct SupportCandidates {
+    std::array<PlayerPosition, SUPPORT_CANDIDATE_COUNT> positions{};
+    std::array<bool, SUPPORT_CANDIDATE_COUNT> available{};
+};
+
 struct TeamControlState {
     std::size_t controlledPlayerIndex;
     bool switchKeyWasPressed;
@@ -73,6 +97,7 @@ struct TeamControlState {
     bool passKeyWasPressed = false;
     const Player* initialContactPlayer = nullptr;
     DefensiveMarking marking{};
+    OffensiveSupport support{};
 };
 
 struct BallAction {
@@ -344,7 +369,10 @@ void updateControlledPlayerIndex(TeamControlState& state,
     if (consumeKeyPress(switchKeyPressed, state.switchKeyWasPressed)
         && team.getPlayerCount() > 0U) {
         const std::size_t next = findClosestPlayerIndex(team, ball, state.controlledPlayerIndex);
-        if (next != state.controlledPlayerIndex) state.marking = {};
+        if (next != state.controlledPlayerIndex) {
+            state.marking = {};
+            state.support = {};
+        }
         state.controlledPlayerIndex = next;
     }
 }
@@ -409,6 +437,7 @@ void resetControlledPlayer(TeamControlState& state) {
     state.controlledPlayerIndex = 0U;
     state.initialContactPlayer = nullptr;
     state.marking = {};
+    state.support = {};
 }
 
 float kickDistanceSquared(const Player& player, const Ball& ball) {
@@ -485,6 +514,7 @@ bool applyPass(const BallAction& action, TeamControlState& state, Ball& ball) {
     ball.setVelocityY(dy / length * BALL_PASS_SPEED);
     state.controlledPlayerIndex = action.receiverIndex;
     state.marking = {};
+    state.support = {};
     return true;
 }
 
@@ -713,8 +743,147 @@ PlayerPosition defensiveZoneTarget(const Player& player, const PlayerPosition& h
     });
 }
 
+float pointSegmentDistance(const PlayerPosition& point, const PlayerPosition& a,
+                            const PlayerPosition& b) {
+    const float dx = b.x - a.x;
+    const float dy = b.y - a.y;
+    const float lengthSquared = dx * dx + dy * dy;
+    float projection = 0.0F;
+    if (lengthSquared > SUPPORT_POSITION_EPSILON * SUPPORT_POSITION_EPSILON) {
+        projection = std::max(0.0F, std::min(1.0F,
+                ((point.x - a.x) * dx + (point.y - a.y) * dy) / lengthSquared));
+    }
+    return std::hypot(point.x - (a.x + projection * dx), point.y - (a.y + projection * dy));
+}
+
+SupportCandidates offensiveSupportCandidates(const Player& player, const PlayerPosition& home,
+                                              const PlayerPosition& base) {
+    const float forward = player.getTeam() == TeamId::Blue
+            ? SUPPORT_FORWARD_OFFSET : -SUPPORT_FORWARD_OFFSET;
+    const std::array<PlayerPosition, SUPPORT_CANDIDATE_COUNT> offsets{{
+        {0.0F, 0.0F}, {0.0F, SUPPORT_LATERAL_OFFSET}, {0.0F, -SUPPORT_LATERAL_OFFSET},
+        {forward, 0.0F}, {-forward, 0.0F},
+        {forward, SUPPORT_LATERAL_OFFSET}, {forward, -SUPPORT_LATERAL_OFFSET},
+        {-forward, SUPPORT_LATERAL_OFFSET}, {-forward, -SUPPORT_LATERAL_OFFSET}
+    }};
+    SupportCandidates candidates;
+    for (std::size_t index = 0; index < offsets.size(); ++index) {
+        const PlayerPosition target = limitSupportTarget(player, home,
+                {base.x + offsets[index].x, base.y + offsets[index].y});
+        bool duplicate = false;
+        for (std::size_t previous = 0; previous < index; ++previous) {
+            if (candidates.available[previous]
+                && std::hypot(target.x - candidates.positions[previous].x,
+                              target.y - candidates.positions[previous].y) <= SUPPORT_POSITION_EPSILON) {
+                duplicate = true;
+                break;
+            }
+        }
+        // Keep fixed offset identities: removing a duplicate must not renumber
+        // the cached candidates when the ball or a regional clamp moves.
+        candidates.positions[index] = target;
+        candidates.available[index] = !duplicate;
+    }
+    return candidates;
+}
+
+float passLanePenalty(const PlayerPosition& origin, const PlayerPosition& target,
+                       const Team& opponents) {
+    float penalty = 0.0F;
+    for (std::size_t index = 0; index < opponents.getPlayerCount(); ++index) {
+        const Player& opponent = *opponents.getPlayers()[index];
+        penalty += std::max(0.0F, PASS_LANE_CLEARANCE
+                - pointSegmentDistance({opponent.getX(), opponent.getY()}, origin, target));
+    }
+    return penalty;
+}
+
+float supportSpacingPenalty(const PlayerPosition& a, const PlayerPosition& b) {
+    return std::max(0.0F, SUPPORT_MIN_SPACING - std::hypot(a.x - b.x, a.y - b.y));
+}
+
+float supportCandidateCost(const PlayerPosition& origin, const PlayerPosition& target,
+                            const PlayerPosition& base, const Team& opponents) {
+    // Linear costs: formation remains the reference; blocked lanes cost more
+    // than a small adjustment, and crowding is penalized without physical forces.
+    return SUPPORT_BASE_WEIGHT * std::hypot(target.x - base.x, target.y - base.y)
+           + SUPPORT_LANE_WEIGHT * passLanePenalty(origin, target, opponents)
+           + SUPPORT_SELECTED_WEIGHT * supportSpacingPenalty(origin, target);
+}
+
+bool validOffensiveSupport(const Team& team, const TeamControlState& state,
+                           const std::array<SupportCandidates, Team::MAX_PLAYERS>& candidates) {
+    if (team.getPlayerCount() != Team::MAX_PLAYERS
+        || state.controlledPlayerIndex >= team.getPlayerCount()
+        || state.support.selectedIndex != state.controlledPlayerIndex) return false;
+    for (std::size_t index = 0; index < team.getPlayerCount(); ++index) {
+        const std::size_t candidate = state.support.candidates[index];
+        if (index == state.controlledPlayerIndex) {
+            if (candidate != NO_SUPPORT_CANDIDATE) return false;
+        } else if (candidate >= SUPPORT_CANDIDATE_COUNT || !candidates[index].available[candidate]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void chooseOffensiveSupportTargets(const Team& team, const Team& opponents,
+                                   TeamControlState& state,
+                                   const std::array<PlayerPosition, Team::MAX_PLAYERS>& homes,
+                                   std::array<PlayerPosition, Team::MAX_PLAYERS>& targets) {
+    std::array<std::size_t, 2> companions{};
+    std::array<SupportCandidates, Team::MAX_PLAYERS> candidates{};
+    std::array<std::array<float, SUPPORT_CANDIDATE_COUNT>, Team::MAX_PLAYERS> costs{};
+    const Player& selected = *team.getPlayers()[state.controlledPlayerIndex];
+    const PlayerPosition origin{selected.getX(), selected.getY()};
+    std::size_t count = 0;
+    for (std::size_t index = 0; index < team.getPlayerCount(); ++index) {
+        if (index == state.controlledPlayerIndex) continue;
+        companions[count++] = index;
+        candidates[index] = offensiveSupportCandidates(*team.getPlayers()[index], homes[index], targets[index]);
+        for (std::size_t candidate = 0; candidate < SUPPORT_CANDIDATE_COUNT; ++candidate) {
+            if (candidates[index].available[candidate]) {
+                costs[index][candidate] = supportCandidateCost(origin,
+                        candidates[index].positions[candidate], targets[index], opponents);
+            }
+        }
+    }
+    const std::size_t first = companions[0], second = companions[1];
+    const auto pairCost = [&](std::size_t a, std::size_t b) {
+        return costs[first][a] + costs[second][b]
+               + SUPPORT_SPACING_WEIGHT * supportSpacingPenalty(
+                       candidates[first].positions[a], candidates[second].positions[b]);
+    };
+    float bestCost = std::numeric_limits<float>::infinity();
+    std::size_t bestA = 0U, bestB = 0U;
+    // At most 81 pairs. Stable offset/registration order breaks exact ties.
+    for (std::size_t a = 0; a < SUPPORT_CANDIDATE_COUNT; ++a) {
+        if (!candidates[first].available[a]) continue;
+        for (std::size_t b = 0; b < SUPPORT_CANDIDATE_COUNT; ++b) {
+            if (!candidates[second].available[b]) continue;
+            const float cost = pairCost(a, b);
+            if (cost < bestCost) { bestCost = cost; bestA = a; bestB = b; }
+        }
+    }
+    if (validOffensiveSupport(team, state, candidates)) {
+        const std::size_t oldA = state.support.candidates[first];
+        const std::size_t oldB = state.support.candidates[second];
+        // Re-evaluate the previous pair with today's geometry, not a saved cost.
+        if (pairCost(oldA, oldB) <= bestCost + SUPPORT_SWITCH_MARGIN) {
+            bestA = oldA;
+            bestB = oldB;
+        }
+    }
+    state.support = {};
+    state.support.selectedIndex = state.controlledPlayerIndex;
+    state.support.candidates[first] = bestA;
+    state.support.candidates[second] = bestB;
+    targets[first] = candidates[first].positions[bestA];
+    targets[second] = candidates[second].positions[bestB];
+}
+
 std::array<PlayerPosition, Team::MAX_PLAYERS> companionSupportTargets(
-                        const Team& team, const TeamControlState& state,
+                        const Team& team, TeamControlState& state,
                         const std::array<PlayerPosition, Team::MAX_PLAYERS>& homes,
                         const Ball& ball,
                         TacticalState tacticalState = TacticalState::Neutral,
@@ -730,6 +899,13 @@ std::array<PlayerPosition, Team::MAX_PLAYERS> companionSupportTargets(
             targets[index] = defensiveZoneTarget(player, homes[index], ball,
                                                  *opponents->getPlayers()[state.marking.opponents[index]]);
         }
+    }
+    if (tacticalState == TacticalState::Attacking && opponents != nullptr
+        && team.getPlayerCount() == Team::MAX_PLAYERS
+        && state.controlledPlayerIndex < team.getPlayerCount()) {
+        chooseOffensiveSupportTargets(team, *opponents, state, homes, targets);
+    } else {
+        state.support = {};
     }
     return targets;
 }
@@ -1109,6 +1285,8 @@ bool updatePlaying(GLFWwindow* window,
             possession = EstimatedPossession::Neutral;
             blueControlState.marking = {};
             redControlState.marking = {};
+            blueControlState.support = {};
+            redControlState.support = {};
             return true;
         }
     }
