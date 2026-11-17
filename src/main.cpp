@@ -8,6 +8,7 @@
 #include <array>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <string>
 
 namespace {
@@ -20,6 +21,9 @@ constexpr float AI_BALL_INFLUENCE = 0.15F;
 constexpr float AI_MAX_OFFSET_X = 12.0F;
 constexpr float AI_MAX_OFFSET_Y = 8.0F;
 constexpr float AI_STOP_DISTANCE = 0.5F;
+constexpr float POSSESSION_SWITCH_MARGIN = 3.0F;
+constexpr float ATTACK_FORWARD_OFFSET = 6.0F;
+constexpr float DEFENSE_BACK_OFFSET = 5.0F;
 constexpr float PLAYER_RADIUS = 2.0F;
 constexpr float BALL_INITIAL_X = 0.0F;
 constexpr float BALL_INITIAL_Y = 0.0F;
@@ -86,6 +90,8 @@ constexpr TeamControls RED_CONTROLS{
 
 enum class GoalSide { None, Left, Right };
 enum class MatchState { Playing, Goal };
+enum class EstimatedPossession { Neutral, Blue, Red };
+enum class TacticalState { Neutral, Attacking, Defending };
 
 void configureProjection(GLFWwindow*, int framebufferWidth, int framebufferHeight) {
     if (framebufferWidth == 0 || framebufferHeight == 0) {
@@ -551,10 +557,40 @@ void correctPlayerPosition(Player& player, float dx, float dy) {
                       -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT);
 }
 
+float nearestTeamBallDistance(const Team& team, const Ball& ball) {
+    if (team.getPlayerCount() == 0U) return std::numeric_limits<float>::infinity();
+    const std::size_t index = findClosestPlayerIndex(team, ball, 0U);
+    return std::sqrt(kickDistanceSquared(*team.getPlayers()[index], ball));
+}
+
+EstimatedPossession estimatePossession(const Team& blueTeam, const Team& redTeam,
+                                       const Ball& ball, EstimatedPossession previous) {
+    const float blueDistance = nearestTeamBallDistance(blueTeam, ball);
+    const float redDistance = nearestTeamBallDistance(redTeam, ball);
+    // Ties and the ambiguity band retain the previous estimate, including
+    // Neutral. The margin is linear, not a difference of squared distances.
+    if (blueDistance == redDistance) return previous;
+    if (blueDistance + POSSESSION_SWITCH_MARGIN <= redDistance) return EstimatedPossession::Blue;
+    if (redDistance + POSSESSION_SWITCH_MARGIN <= blueDistance) return EstimatedPossession::Red;
+    return previous;
+}
+
+TacticalState teamTacticalState(TeamId id, EstimatedPossession possession) {
+    if (possession == EstimatedPossession::Neutral) return TacticalState::Neutral;
+    const bool attacking = (id == TeamId::Blue && possession == EstimatedPossession::Blue)
+                           || (id == TeamId::Red && possession == EstimatedPossession::Red);
+    return attacking ? TacticalState::Attacking : TacticalState::Defending;
+}
+
 PlayerPosition automaticSupportTarget(const Player& player,
-                                      const PlayerPosition& home, const Ball& ball) {
+                                      const PlayerPosition& home, const Ball& ball,
+                                      TacticalState tacticalState = TacticalState::Neutral) {
+    const float forward = player.getTeam() == TeamId::Blue ? 1.0F : -1.0F;
+    const float tacticalOffset = tacticalState == TacticalState::Attacking
+            ? forward * ATTACK_FORWARD_OFFSET
+            : (tacticalState == TacticalState::Defending ? -forward * DEFENSE_BACK_OFFSET : 0.0F);
     const float offsetX = std::max(-AI_MAX_OFFSET_X,
-                                  std::min(ball.getX() * AI_BALL_INFLUENCE, AI_MAX_OFFSET_X));
+            std::min(ball.getX() * AI_BALL_INFLUENCE + tacticalOffset, AI_MAX_OFFSET_X));
     const float offsetY = std::max(-AI_MAX_OFFSET_Y,
                                   std::min(ball.getY() * AI_BALL_INFLUENCE, AI_MAX_OFFSET_Y));
     return {
@@ -567,12 +603,13 @@ PlayerPosition automaticSupportTarget(const Player& player,
 
 void moveTeamCompanions(Team& team, const TeamControlState& state,
                         const std::array<PlayerPosition, Team::MAX_PLAYERS>& homes,
-                        const Ball& ball, float stepTime) {
+                        const Ball& ball, float stepTime,
+                        TacticalState tacticalState = TacticalState::Neutral) {
     if (stepTime <= 0.0F) return;
     for (std::size_t index = 0; index < team.getPlayerCount(); ++index) {
         if (index == state.controlledPlayerIndex) continue;
         Player& player = *team.getPlayers()[index];
-        const PlayerPosition target = automaticSupportTarget(player, homes[index], ball);
+        const PlayerPosition target = automaticSupportTarget(player, homes[index], ball, tacticalState);
         const float dx = target.x - player.getX();
         const float dy = target.y - player.getY();
         const float distanceSquared = dx * dx + dy * dy;
@@ -831,7 +868,7 @@ bool updatePlaying(GLFWwindow* window,
                    Team& blueTeam, TeamControlState& blueControlState,
                    Team& redTeam, TeamControlState& redControlState,
                    Ball& ball,
-                   float deltaTime) {
+                   float deltaTime, EstimatedPossession& possession) {
     // Consume even failed attempts once per frame, never once per substep.
     const bool blueKick = consumeKeyPress(isKeyPressed(window, BLUE_CONTROLS.kickKey),
                                           blueControlState.kickKeyWasPressed);
@@ -855,8 +892,11 @@ bool updatePlaying(GLFWwindow* window,
                         BLUE_CONTROLS, ball, stepTime);
         handleTeamInput(window, redTeam, redControlState,
                         RED_CONTROLS, ball, stepTime);
-        moveTeamCompanions(blueTeam, blueControlState, BLUE_INITIAL_POSITIONS, ball, stepTime);
-        moveTeamCompanions(redTeam, redControlState, RED_INITIAL_POSITIONS, ball, stepTime);
+        possession = estimatePossession(blueTeam, redTeam, ball, possession);
+        moveTeamCompanions(blueTeam, blueControlState, BLUE_INITIAL_POSITIONS, ball, stepTime,
+                           teamTacticalState(blueTeam.getId(), possession));
+        moveTeamCompanions(redTeam, redControlState, RED_INITIAL_POSITIONS, ball, stepTime,
+                           teamTacticalState(redTeam.getId(), possession));
         resolvePlayerCollisions(blueTeam, bluePrevious, redTeam, redPrevious);
         const BallAction blueAction = step == 0 ? prepareBallAction(
                 blueTeam, blueControlState, ball, blueKick, bluePass) : BallAction{};
@@ -923,6 +963,7 @@ bool updatePlaying(GLFWwindow* window,
             }
         }
         if (updateScore(ball, blueTeam, redTeam)) {
+            possession = EstimatedPossession::Neutral;
             return true;
         }
     }
@@ -938,7 +979,8 @@ void resetPlayers(Team& team,
     }
 }
 
-void resetPlay(Team& blueTeam, Team& redTeam, Ball& ball) {
+void resetPlay(Team& blueTeam, Team& redTeam, Ball& ball, EstimatedPossession& possession) {
+    possession = EstimatedPossession::Neutral;
     resetPlayers(blueTeam, BLUE_INITIAL_POSITIONS);
     resetPlayers(redTeam, RED_INITIAL_POSITIONS);
     ball.setX(BALL_INITIAL_X);
@@ -1104,6 +1146,7 @@ int main() {
     }
     TeamControlState blueControlState{0U, false};
     TeamControlState redControlState{0U, false};
+    EstimatedPossession possession = EstimatedPossession::Neutral;
     MatchState matchState = MatchState::Playing;
     float goalStateElapsed = 0.0F;
 
@@ -1118,7 +1161,7 @@ int main() {
             if (updatePlaying(window,
                               blueTeam, blueControlState,
                               redTeam, redControlState,
-                              ball, deltaTime)) {
+                              ball, deltaTime, possession)) {
                 matchState = MatchState::Goal;
                 goalStateElapsed = 0.0F;
                 resetControlledPlayer(blueControlState);
@@ -1129,7 +1172,7 @@ int main() {
             syncTeamInputState(window, redControlState, RED_CONTROLS);
             goalStateElapsed += deltaTime;
             if (goalStateElapsed >= GOAL_STATE_DURATION) {
-                resetPlay(blueTeam, redTeam, ball);
+                resetPlay(blueTeam, redTeam, ball, possession);
                 matchState = MatchState::Playing;
             }
         }
