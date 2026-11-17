@@ -22,6 +22,7 @@ constexpr float BALL_INITIAL_VELOCITY_X = 14.0F;
 constexpr float BALL_INITIAL_VELOCITY_Y = 9.0F;
 constexpr float BALL_RADIUS = 1.0F;
 constexpr float BALL_IMPACT_SPEED = 20.0F;
+constexpr float BALL_KICK_SPEED = 35.0F;
 constexpr float FIELD_HALF_HEIGHT = 34.0F;
 constexpr float GOAL_DEPTH = 2.44F;
 constexpr float GOAL_HALF_HEIGHT = 3.66F;
@@ -39,11 +40,14 @@ struct TeamControls {
     int leftKey;
     int rightKey;
     int switchKey;
+    int kickKey;
 };
 
 struct TeamControlState {
     std::size_t controlledPlayerIndex;
     bool switchKeyWasPressed;
+    bool kickKeyWasPressed = false;
+    const Player* kickContactPlayer = nullptr;
 };
 
 constexpr std::array<PlayerPosition, Team::MAX_PLAYERS> BLUE_INITIAL_POSITIONS{{
@@ -57,10 +61,11 @@ constexpr std::array<PlayerPosition, Team::MAX_PLAYERS> RED_INITIAL_POSITIONS{{
     {35.0F, -12.0F}
 }};
 constexpr TeamControls BLUE_CONTROLS{
-    GLFW_KEY_W, GLFW_KEY_S, GLFW_KEY_A, GLFW_KEY_D, GLFW_KEY_TAB
+    GLFW_KEY_W, GLFW_KEY_S, GLFW_KEY_A, GLFW_KEY_D, GLFW_KEY_TAB, GLFW_KEY_SPACE
 };
 constexpr TeamControls RED_CONTROLS{
-    GLFW_KEY_UP, GLFW_KEY_DOWN, GLFW_KEY_LEFT, GLFW_KEY_RIGHT, GLFW_KEY_ENTER
+    GLFW_KEY_UP, GLFW_KEY_DOWN, GLFW_KEY_LEFT, GLFW_KEY_RIGHT, GLFW_KEY_ENTER,
+    GLFW_KEY_RIGHT_SHIFT
 };
 
 enum class GoalSide { None, Left, Right };
@@ -270,6 +275,12 @@ bool isKeyPressed(GLFWwindow* window, int key) {
     return glfwGetKey(window, key) == GLFW_PRESS;
 }
 
+bool consumeKeyPress(bool pressed, bool& wasPressed) {
+    const bool justPressed = pressed && !wasPressed;
+    wasPressed = pressed;
+    return justPressed;
+}
+
 std::size_t findClosestPlayerIndex(const Team& team, const Ball& ball,
                                    std::size_t currentIndex) {
     const auto& players = team.getPlayers();
@@ -295,20 +306,18 @@ std::size_t findClosestPlayerIndex(const Team& team, const Ball& ball,
 void updateControlledPlayerIndex(TeamControlState& state,
                                  const Team& team, const Ball& ball,
                                  bool switchKeyPressed) {
-    if (switchKeyPressed && !state.switchKeyWasPressed
+    if (consumeKeyPress(switchKeyPressed, state.switchKeyWasPressed)
         && team.getPlayerCount() > 0U) {
         state.controlledPlayerIndex =
                 findClosestPlayerIndex(team, ball, state.controlledPlayerIndex);
     }
-    state.switchKeyWasPressed = switchKeyPressed;
 }
 
 Player& getControlledPlayer(Team& team, const TeamControlState& state) {
     return *team.getPlayers()[state.controlledPlayerIndex];
 }
 
-void handlePlayerInput(GLFWwindow* window, Player& player,
-                       const TeamControls& controls, float deltaTime) {
+PlayerPosition readMovementDirection(GLFWwindow* window, const TeamControls& controls) {
     float directionX = 0.0F;
     float directionY = 0.0F;
 
@@ -331,9 +340,14 @@ void handlePlayerInput(GLFWwindow* window, Player& player,
     if (directionLength > 0.0F) {
         directionX /= directionLength;
         directionY /= directionLength;
-        player.move(directionX, directionY, deltaTime);
     }
+    return {directionX, directionY};
+}
 
+void handlePlayerInput(GLFWwindow* window, Player& player,
+                       const TeamControls& controls, float deltaTime) {
+    const PlayerPosition direction = readMovementDirection(window, controls);
+    player.move(direction.x, direction.y, deltaTime);
     player.keepInside(-FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
                       -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT);
 }
@@ -347,13 +361,63 @@ void handleTeamInput(GLFWwindow* window, Team& team,
                       controls, deltaTime);
 }
 
-void syncSwitchKeyState(GLFWwindow* window, TeamControlState& state,
+void syncTeamInputState(GLFWwindow* window, TeamControlState& state,
                         const TeamControls& controls) {
     state.switchKeyWasPressed = isKeyPressed(window, controls.switchKey);
+    state.kickKeyWasPressed = isKeyPressed(window, controls.kickKey);
+    state.kickContactPlayer = nullptr;
 }
 
 void resetControlledPlayer(TeamControlState& state) {
     state.controlledPlayerIndex = 0U;
+    state.kickContactPlayer = nullptr;
+}
+
+float kickDistanceSquared(const Player& player, const Ball& ball) {
+    const float dx = player.getX() - ball.getX();
+    const float dy = player.getY() - ball.getY();
+    return dx * dx + dy * dy;
+}
+
+bool canKick(const Player& player, const Ball& ball) {
+    const float range = player.getRadius() + ball.getRadius() + 0.5F;
+    return kickDistanceSquared(player, ball) <= range * range;
+}
+
+Player* chooseKicker(Player& blue, bool blueRequested,
+                     Player& red, bool redRequested, const Ball& ball) {
+    const bool blueValid = blueRequested && canKick(blue, ball);
+    const bool redValid = redRequested && canKick(red, ball);
+    if (blueValid && redValid) {
+        const float blueDistance = kickDistanceSquared(blue, ball);
+        const float redDistance = kickDistanceSquared(red, ball);
+        if (blueDistance == redDistance) return nullptr;
+        return blueDistance < redDistance ? &blue : &red;
+    }
+    return blueValid ? &blue : (redValid ? &red : nullptr);
+}
+
+void applyKick(GLFWwindow* window, const Player& player,
+               const TeamControls& controls, Ball& ball) {
+    PlayerPosition direction = readMovementDirection(window, controls);
+    if (direction.x == 0.0F && direction.y == 0.0F) {
+        direction.x = player.getTeam() == TeamId::Blue ? 1.0F : -1.0F;
+    }
+    ball.setVelocityX(direction.x * BALL_KICK_SPEED);
+    ball.setVelocityY(direction.y * BALL_KICK_SPEED);
+}
+
+const Player* protectedKickContact(TeamControlState& state, const Ball& ball) {
+    // Protect only the originating player's initial reach interaction, not
+    // other players or later return contacts. Separation remains enabled.
+    if (state.kickContactPlayer != nullptr) {
+        const float range = state.kickContactPlayer->getRadius() + ball.getRadius()
+                            + 0.5F + 0.0001F;
+        if (kickDistanceSquared(*state.kickContactPlayer, ball) > range * range) {
+            state.kickContactPlayer = nullptr;
+        }
+    }
+    return state.kickContactPlayer;
 }
 
 bool resolvePlayerBallCollision(const Player& player, Ball& ball,
@@ -548,7 +612,8 @@ void resolvePlayerCollisions(
 
 void resolveTeamBallCollisions(
         const Team& team, const std::array<PlayerPosition, Team::MAX_PLAYERS>& previous,
-        Ball& ball, float deltaTime, bool& impulseApplied) {
+        Ball& ball, float deltaTime, bool& impulseApplied,
+        const Player* protectedPlayer = nullptr) {
     for (std::size_t index = 0; index < team.getPlayerCount(); ++index) {
         const Player& player = *team.getPlayers()[index];
         const float velocityX = deltaTime > 0.0F
@@ -556,7 +621,7 @@ void resolveTeamBallCollisions(
         const float velocityY = deltaTime > 0.0F
                 ? (player.getY() - previous[index].y) / deltaTime : 0.0F;
         if (resolvePlayerBallCollision(player, ball, velocityX, velocityY,
-                                       !impulseApplied)) {
+                                       !impulseApplied && &player != protectedPlayer)) {
             impulseApplied = true;
         }
     }
@@ -659,9 +724,14 @@ bool updatePlaying(GLFWwindow* window,
                    Team& redTeam, TeamControlState& redControlState,
                    Ball& ball,
                    float deltaTime) {
+    // Consume even failed attempts once per frame, never once per substep.
+    const bool blueKick = consumeKeyPress(isKeyPressed(window, BLUE_CONTROLS.kickKey),
+                                          blueControlState.kickKeyWasPressed);
+    const bool redKick = consumeKeyPress(isKeyPressed(window, RED_CONTROLS.kickKey),
+                                         redControlState.kickKeyWasPressed);
     // Bound travel per step, including the existing impact speed, to avoid
     // skipping a player during an ordinary frame or a temporary frame delay.
-    const float maximumSpeed = std::max(BALL_IMPACT_SPEED,
+    const float maximumSpeed = std::max(BALL_KICK_SPEED,
             std::hypot(ball.getVelocityX(), ball.getVelocityY())) + PLAYER_SPEED;
     const int steps = std::max(1, static_cast<int>(std::ceil(
             deltaTime * maximumSpeed / (ball.getRadius() * 0.5F))));
@@ -675,23 +745,59 @@ bool updatePlaying(GLFWwindow* window,
                         RED_CONTROLS, ball, stepTime);
         resolvePlayerCollisions(blueTeam, blueControlState, bluePrevious,
                                 redTeam, redControlState, redPrevious);
+        Player* kicker = step == 0 ? chooseKicker(
+                getControlledPlayer(blueTeam, blueControlState), blueKick,
+                getControlledPlayer(redTeam, redControlState), redKick, ball) : nullptr;
+        const float velocityBeforeX = ball.getVelocityX();
+        const float velocityBeforeY = ball.getVelocityY();
         ball.update(stepTime, -FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
                     -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT, GOAL_DEPTH, GOAL_HALF_HEIGHT);
+
+        // A wall rebound ends the initial contact protection: return contacts
+        // with the kicker are legitimate collisions again.
+        if (ball.getVelocityX() != velocityBeforeX || ball.getVelocityY() != velocityBeforeY) {
+            blueControlState.kickContactPlayer = nullptr;
+            redControlState.kickContactPlayer = nullptr;
+        }
+        const Player* protectedPlayer = protectedKickContact(blueControlState, ball);
+        const Player* redProtected = protectedKickContact(redControlState, ball);
+        if (protectedPlayer == nullptr) protectedPlayer = redProtected;
 
         // Fixed Blue/Red, registration order. At most one impulse per step;
         // extra passes correct positions only, including wall constraints.
         bool impulseApplied = false;
         for (int pass = 0; pass < 4; ++pass) {
-            resolveTeamBallCollisions(blueTeam, bluePrevious, ball, stepTime, impulseApplied);
-            resolveTeamBallCollisions(redTeam, redPrevious, ball, stepTime, impulseApplied);
+            resolveTeamBallCollisions(blueTeam, bluePrevious, ball, stepTime,
+                                      impulseApplied, protectedPlayer);
+            resolveTeamBallCollisions(redTeam, redPrevious, ball, stepTime,
+                                      impulseApplied, protectedPlayer);
+            if (pass == 0 && impulseApplied) {
+                blueControlState.kickContactPlayer = nullptr;
+                redControlState.kickContactPlayer = nullptr;
+            }
             impulseApplied = true;
+            const float contactVelocityX = ball.getVelocityX();
+            const float contactVelocityY = ball.getVelocityY();
             ball.update(0.0F, -FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
                         -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT, GOAL_DEPTH, GOAL_HALF_HEIGHT);
+            if (ball.getVelocityX() != contactVelocityX || ball.getVelocityY() != contactVelocityY) {
+                blueControlState.kickContactPlayer = nullptr;
+                redControlState.kickContactPlayer = nullptr;
+                protectedPlayer = nullptr;
+            }
             if (isBallPositionClear(blueTeam, redTeam, ball)) {
                 break;
             }
         }
         releaseTrappedBall(blueTeam, redTeam, ball);
+        // Apply after this step's contact resolution so the originating
+        // contact cannot overwrite 35 with the normal impact speed of 20.
+        if (kicker != nullptr) {
+            const bool blue = kicker->getTeam() == TeamId::Blue;
+            applyKick(window, *kicker, blue ? BLUE_CONTROLS : RED_CONTROLS, ball);
+            blueControlState.kickContactPlayer = blue ? kicker : nullptr;
+            redControlState.kickContactPlayer = blue ? nullptr : kicker;
+        }
         if (updateScore(ball, blueTeam, redTeam)) {
             return true;
         }
@@ -895,8 +1001,8 @@ int main() {
                 resetControlledPlayer(redControlState);
             }
         } else {
-            syncSwitchKeyState(window, blueControlState, BLUE_CONTROLS);
-            syncSwitchKeyState(window, redControlState, RED_CONTROLS);
+            syncTeamInputState(window, blueControlState, BLUE_CONTROLS);
+            syncTeamInputState(window, redControlState, RED_CONTROLS);
             goalStateElapsed += deltaTime;
             if (goalStateElapsed >= GOAL_STATE_DURATION) {
                 resetPlay(blueTeam, redTeam, ball);
