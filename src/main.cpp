@@ -15,6 +15,11 @@ constexpr double WORLD_WIDTH = 120.0;
 constexpr double WORLD_HEIGHT = 80.0;
 constexpr float FIELD_HALF_WIDTH = 52.5F;
 constexpr float PLAYER_SPEED = 12.0F;
+constexpr float AI_MOVEMENT_SPEED = 0.6F * PLAYER_SPEED;
+constexpr float AI_BALL_INFLUENCE = 0.15F;
+constexpr float AI_MAX_OFFSET_X = 12.0F;
+constexpr float AI_MAX_OFFSET_Y = 8.0F;
+constexpr float AI_STOP_DISTANCE = 0.5F;
 constexpr float PLAYER_RADIUS = 2.0F;
 constexpr float BALL_INITIAL_X = 0.0F;
 constexpr float BALL_INITIAL_Y = 0.0F;
@@ -546,9 +551,43 @@ void correctPlayerPosition(Player& player, float dx, float dy) {
                       -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT);
 }
 
-void resolvePlayerPair(Player& a, bool aControlled, const PlayerPosition& previousA,
-                       Player& b, bool bControlled, const PlayerPosition& previousB) {
-    if (!aControlled && !bControlled) {
+PlayerPosition automaticSupportTarget(const Player& player,
+                                      const PlayerPosition& home, const Ball& ball) {
+    const float offsetX = std::max(-AI_MAX_OFFSET_X,
+                                  std::min(ball.getX() * AI_BALL_INFLUENCE, AI_MAX_OFFSET_X));
+    const float offsetY = std::max(-AI_MAX_OFFSET_Y,
+                                  std::min(ball.getY() * AI_BALL_INFLUENCE, AI_MAX_OFFSET_Y));
+    return {
+        std::max(-FIELD_HALF_WIDTH + player.getRadius(),
+                 std::min(home.x + offsetX, FIELD_HALF_WIDTH - player.getRadius())),
+        std::max(-FIELD_HALF_HEIGHT + player.getRadius(),
+                 std::min(home.y + offsetY, FIELD_HALF_HEIGHT - player.getRadius()))
+    };
+}
+
+void moveTeamCompanions(Team& team, const TeamControlState& state,
+                        const std::array<PlayerPosition, Team::MAX_PLAYERS>& homes,
+                        const Ball& ball, float stepTime) {
+    if (stepTime <= 0.0F) return;
+    for (std::size_t index = 0; index < team.getPlayerCount(); ++index) {
+        if (index == state.controlledPlayerIndex) continue;
+        Player& player = *team.getPlayers()[index];
+        const PlayerPosition target = automaticSupportTarget(player, homes[index], ball);
+        const float dx = target.x - player.getX();
+        const float dy = target.y - player.getY();
+        const float distanceSquared = dx * dx + dy * dy;
+        if (distanceSquared <= AI_STOP_DISTANCE * AI_STOP_DISTANCE) continue;
+        const float distance = std::sqrt(distanceSquared);
+        // Stop at the edge of the dead zone, including on a long step.
+        const float travel = std::min(AI_MOVEMENT_SPEED * stepTime,
+                                      distance - AI_STOP_DISTANCE);
+        correctPlayerPosition(player, dx / distance * travel, dy / distance * travel);
+    }
+}
+
+void resolvePlayerPair(Player& a, bool aMovable, const PlayerPosition& previousA,
+                       Player& b, bool bMovable, const PlayerPosition& previousB) {
+    if (!aMovable && !bMovable) {
         return;
     }
     float dx = b.getX() - a.getX();
@@ -565,7 +604,7 @@ void resolvePlayerPair(Player& a, bool aControlled, const PlayerPosition& previo
         dy /= distance;
     } else {
         // Prefer the previous separation; otherwise choose an inward direction
-        // for a lone controlled player. Two controlled players share the axis.
+        // for a lone moving player. Two moving players share the axis.
         dx = previousB.x - previousA.x;
         dy = previousB.y - previousA.y;
         const float previousDistance = std::hypot(dx, dy);
@@ -573,50 +612,55 @@ void resolvePlayerPair(Player& a, bool aControlled, const PlayerPosition& previo
             dx /= previousDistance;
             dy /= previousDistance;
         } else {
-            dx = aControlled ? (a.getX() >= 0.0F ? 1.0F : -1.0F)
+            dx = aMovable ? (a.getX() >= 0.0F ? 1.0F : -1.0F)
                              : (b.getX() >= 0.0F ? -1.0F : 1.0F);
             dy = 0.0F;
         }
     }
 
     const float penetration = radius - distance;
-    const float correctionA = aControlled ? penetration * (bControlled ? 0.5F : 1.0F) : 0.0F;
-    const float correctionB = bControlled ? penetration * (aControlled ? 0.5F : 1.0F) : 0.0F;
+    const float correctionA = aMovable ? penetration * (bMovable ? 0.5F : 1.0F) : 0.0F;
+    const float correctionB = bMovable ? penetration * (aMovable ? 0.5F : 1.0F) : 0.0F;
     const float ax = a.getX();
     const float ay = a.getY();
     const float bx = b.getX();
     const float by = b.getY();
-    if (aControlled) correctPlayerPosition(a, -dx * correctionA, -dy * correctionA);
-    if (bControlled) correctPlayerPosition(b, dx * correctionB, dy * correctionB);
+    if (aMovable) correctPlayerPosition(a, -dx * correctionA, -dy * correctionA);
+    if (bMovable) correctPlayerPosition(b, dx * correctionB, dy * correctionB);
 
     // Transfer correction prevented by a wall to the other movable player.
     const float blockedA = std::max(0.0F, correctionA
             - ((ax - a.getX()) * dx + (ay - a.getY()) * dy));
     const float blockedB = std::max(0.0F, correctionB
             - ((b.getX() - bx) * dx + (b.getY() - by) * dy));
-    if (bControlled) correctPlayerPosition(b, dx * blockedA, dy * blockedA);
-    if (aControlled) correctPlayerPosition(a, -dx * blockedB, -dy * blockedB);
+    if (bMovable) correctPlayerPosition(b, dx * blockedA, dy * blockedA);
+    if (aMovable) correctPlayerPosition(a, -dx * blockedB, -dy * blockedB);
 }
 
 void resolvePlayerCollisions(
-        Team& blueTeam, const TeamControlState& blueState,
+        Team& blueTeam,
         const std::array<PlayerPosition, Team::MAX_PLAYERS>& bluePrevious,
-        Team& redTeam, const TeamControlState& redState,
+        Team& redTeam,
         const std::array<PlayerPosition, Team::MAX_PLAYERS>& redPrevious) {
     constexpr std::size_t CAPACITY = 2U * Team::MAX_PLAYERS;
     std::array<Player*, CAPACITY> players{};
     std::array<PlayerPosition, CAPACITY> previous{};
-    std::array<bool, CAPACITY> controlled{};
+    std::array<bool, CAPACITY> movable{};
     std::size_t count = 0;
     for (std::size_t i = 0; i < blueTeam.getPlayerCount(); ++i, ++count) {
         players[count] = blueTeam.getPlayers()[i];
         previous[count] = bluePrevious[i];
-        controlled[count] = i == blueState.controlledPlayerIndex;
     }
     for (std::size_t i = 0; i < redTeam.getPlayerCount(); ++i, ++count) {
         players[count] = redTeam.getPlayers()[i];
         previous[count] = redPrevious[i];
-        controlled[count] = i == redState.controlledPlayerIndex;
+    }
+
+    // Mobility is physical, not selection-based: moving humans and companions
+    // share correction; a player stopped this step remains an obstacle.
+    for (std::size_t i = 0; i < count; ++i) {
+        movable[i] = players[i]->getX() != previous[i].x
+                     || players[i]->getY() != previous[i].y;
     }
 
     constexpr int MAX_PASSES = 8;
@@ -626,7 +670,7 @@ void resolvePlayerCollisions(
         bool overlapping = false;
         for (std::size_t i = 0; i < count; ++i) {
             for (std::size_t j = i + 1U; j < count; ++j) {
-                if (!controlled[i] && !controlled[j]) continue;
+                if (!movable[i] && !movable[j]) continue;
                 const float dx = players[j]->getX() - players[i]->getX();
                 const float dy = players[j]->getY() - players[i]->getY();
                 const float radius = players[i]->getRadius() + players[j]->getRadius();
@@ -635,8 +679,8 @@ void resolvePlayerCollisions(
                 overlapping = true;
                 Player a = *players[i];
                 Player b = *players[j];
-                resolvePlayerPair(a, controlled[i], previous[i],
-                                   b, controlled[j], previous[j]);
+                resolvePlayerPair(a, movable[i], previous[i],
+                                   b, movable[j], previous[j]);
                 corrections[i].x += a.getX() - players[i]->getX();
                 corrections[i].y += a.getY() - players[i]->getY();
                 corrections[j].x += b.getX() - players[j]->getX();
@@ -647,7 +691,7 @@ void resolvePlayerCollisions(
         if (pass == MAX_PASSES) break;
         // Apply simultaneous corrections from a common snapshot, not team order.
         for (std::size_t i = 0; i < count; ++i) {
-            if (controlled[i]) correctPlayerPosition(*players[i], corrections[i].x, corrections[i].y);
+            if (movable[i]) correctPlayerPosition(*players[i], corrections[i].x, corrections[i].y);
         }
     }
 
@@ -656,7 +700,7 @@ void resolvePlayerCollisions(
     bool previousValid = true;
     for (std::size_t i = 0; i < count; ++i) {
         for (std::size_t j = i + 1U; j < count; ++j) {
-            if (!controlled[i] && !controlled[j]) continue;
+            if (!movable[i] && !movable[j]) continue;
             const float dx = previous[j].x - previous[i].x;
             const float dy = previous[j].y - previous[i].y;
             const float radius = players[i]->getRadius() + players[j]->getRadius()
@@ -666,7 +710,7 @@ void resolvePlayerCollisions(
     }
     if (previousValid) {
         for (std::size_t i = 0; i < count; ++i) {
-            if (controlled[i]) {
+            if (movable[i]) {
                 players[i]->setX(previous[i].x);
                 players[i]->setY(previous[i].y);
             }
@@ -811,8 +855,9 @@ bool updatePlaying(GLFWwindow* window,
                         BLUE_CONTROLS, ball, stepTime);
         handleTeamInput(window, redTeam, redControlState,
                         RED_CONTROLS, ball, stepTime);
-        resolvePlayerCollisions(blueTeam, blueControlState, bluePrevious,
-                                redTeam, redControlState, redPrevious);
+        moveTeamCompanions(blueTeam, blueControlState, BLUE_INITIAL_POSITIONS, ball, stepTime);
+        moveTeamCompanions(redTeam, redControlState, RED_INITIAL_POSITIONS, ball, stepTime);
+        resolvePlayerCollisions(blueTeam, bluePrevious, redTeam, redPrevious);
         const BallAction blueAction = step == 0 ? prepareBallAction(
                 blueTeam, blueControlState, ball, blueKick, bluePass) : BallAction{};
         const BallAction redAction = step == 0 ? prepareBallAction(
