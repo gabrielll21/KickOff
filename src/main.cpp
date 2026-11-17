@@ -32,6 +32,19 @@ struct PlayerPosition {
     float y;
 };
 
+struct TeamControls {
+    int upKey;
+    int downKey;
+    int leftKey;
+    int rightKey;
+    int switchKey;
+};
+
+struct TeamControlState {
+    std::size_t controlledPlayerIndex;
+    bool switchKeyWasPressed;
+};
+
 constexpr std::array<PlayerPosition, Team::MAX_PLAYERS> BLUE_INITIAL_POSITIONS{{
     {-25.0F, 0.0F},
     {-35.0F, 12.0F},
@@ -42,6 +55,12 @@ constexpr std::array<PlayerPosition, Team::MAX_PLAYERS> RED_INITIAL_POSITIONS{{
     {35.0F, 12.0F},
     {35.0F, -12.0F}
 }};
+constexpr TeamControls BLUE_CONTROLS{
+    GLFW_KEY_W, GLFW_KEY_S, GLFW_KEY_A, GLFW_KEY_D, GLFW_KEY_TAB
+};
+constexpr TeamControls RED_CONTROLS{
+    GLFW_KEY_UP, GLFW_KEY_DOWN, GLFW_KEY_LEFT, GLFW_KEY_RIGHT, GLFW_KEY_ENTER
+};
 
 enum class GoalSide { None, Left, Right };
 enum class MatchState { Playing, Goal };
@@ -246,20 +265,39 @@ void drawArc(float centerX, float centerY, float radius,
     glEnd();
 }
 
-void handlePlayerInput(GLFWwindow* window, Player& player, float deltaTime) {
+bool isKeyPressed(GLFWwindow* window, int key) {
+    return glfwGetKey(window, key) == GLFW_PRESS;
+}
+
+void updateControlledPlayerIndex(TeamControlState& state,
+                                 std::size_t playerCount,
+                                 bool switchKeyPressed) {
+    if (switchKeyPressed && !state.switchKeyWasPressed && playerCount > 0U) {
+        state.controlledPlayerIndex =
+                (state.controlledPlayerIndex + 1U) % playerCount;
+    }
+    state.switchKeyWasPressed = switchKeyPressed;
+}
+
+Player& getControlledPlayer(Team& team, const TeamControlState& state) {
+    return *team.getPlayers()[state.controlledPlayerIndex];
+}
+
+void handlePlayerInput(GLFWwindow* window, Player& player,
+                       const TeamControls& controls, float deltaTime) {
     float directionX = 0.0F;
     float directionY = 0.0F;
 
-    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) {
+    if (isKeyPressed(window, controls.upKey)) {
         directionY += 1.0F;
     }
-    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) {
+    if (isKeyPressed(window, controls.downKey)) {
         directionY -= 1.0F;
     }
-    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) {
+    if (isKeyPressed(window, controls.leftKey)) {
         directionX -= 1.0F;
     }
-    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) {
+    if (isKeyPressed(window, controls.rightKey)) {
         directionX += 1.0F;
     }
 
@@ -274,6 +312,24 @@ void handlePlayerInput(GLFWwindow* window, Player& player, float deltaTime) {
 
     player.keepInside(-FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
                       -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT);
+}
+
+void handleTeamInput(GLFWwindow* window, Team& team,
+                     TeamControlState& state, const TeamControls& controls,
+                     float deltaTime) {
+    updateControlledPlayerIndex(state, team.getPlayerCount(),
+                                isKeyPressed(window, controls.switchKey));
+    handlePlayerInput(window, getControlledPlayer(team, state),
+                      controls, deltaTime);
+}
+
+void syncSwitchKeyState(GLFWwindow* window, TeamControlState& state,
+                        const TeamControls& controls) {
+    state.switchKeyWasPressed = isKeyPressed(window, controls.switchKey);
+}
+
+void resetControlledPlayer(TeamControlState& state) {
+    state.controlledPlayerIndex = 0U;
 }
 
 void resolvePlayerBallCollision(const Player& player, Ball& ball) {
@@ -313,15 +369,23 @@ void resolvePlayerBallCollision(const Player& player, Ball& ball) {
     ball.setVelocityY(directionY * BALL_IMPACT_SPEED);
 }
 
-bool updatePlaying(GLFWwindow* window, Player& player,
-                   Ball& ball, Team& leftTeam, Team& rightTeam,
+bool updatePlaying(GLFWwindow* window,
+                   Team& blueTeam, TeamControlState& blueControlState,
+                   Team& redTeam, TeamControlState& redControlState,
+                   Ball& ball,
                    float deltaTime) {
-    handlePlayerInput(window, player, deltaTime);
-    resolvePlayerBallCollision(player, ball);
+    handleTeamInput(window, blueTeam, blueControlState,
+                    BLUE_CONTROLS, deltaTime);
+    handleTeamInput(window, redTeam, redControlState,
+                    RED_CONTROLS, deltaTime);
+    resolvePlayerBallCollision(
+            getControlledPlayer(blueTeam, blueControlState), ball);
+    resolvePlayerBallCollision(
+            getControlledPlayer(redTeam, redControlState), ball);
     ball.update(deltaTime, -FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
                 -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT,
                 GOAL_DEPTH, GOAL_HALF_HEIGHT);
-    return updateScore(ball, leftTeam, rightTeam);
+    return updateScore(ball, blueTeam, redTeam);
 }
 
 void resetPlayers(Team& team,
@@ -489,7 +553,8 @@ int main() {
     for (Player& player : redPlayers) {
         redTeam.addPlayer(player);
     }
-    Player& controlledPlayer = bluePlayers[0];
+    TeamControlState blueControlState{0U, false};
+    TeamControlState redControlState{0U, false};
     MatchState matchState = MatchState::Playing;
     float goalStateElapsed = 0.0F;
 
@@ -501,12 +566,18 @@ int main() {
         previousTime = currentTime;
 
         if (matchState == MatchState::Playing) {
-            if (updatePlaying(window, controlledPlayer, ball,
-                              blueTeam, redTeam, deltaTime)) {
+            if (updatePlaying(window,
+                              blueTeam, blueControlState,
+                              redTeam, redControlState,
+                              ball, deltaTime)) {
                 matchState = MatchState::Goal;
                 goalStateElapsed = 0.0F;
+                resetControlledPlayer(blueControlState);
+                resetControlledPlayer(redControlState);
             }
         } else {
+            syncSwitchKeyState(window, blueControlState, BLUE_CONTROLS);
+            syncSwitchKeyState(window, redControlState, RED_CONTROLS);
             goalStateElapsed += deltaTime;
             if (goalStateElapsed >= GOAL_STATE_DURATION) {
                 resetPlay(blueTeam, redTeam, ball);
