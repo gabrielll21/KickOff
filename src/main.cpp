@@ -4,6 +4,7 @@
 
 #include <GLFW/glfw3.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <iostream>
@@ -355,14 +356,16 @@ void resetControlledPlayer(TeamControlState& state) {
     state.controlledPlayerIndex = 0U;
 }
 
-void resolvePlayerBallCollision(const Player& player, Ball& ball) {
+bool resolvePlayerBallCollision(const Player& player, Ball& ball,
+                                float playerVelocityX, float playerVelocityY,
+                                bool allowImpulse) {
     const float deltaX = ball.getX() - player.getX();
     const float deltaY = ball.getY() - player.getY();
     const float minimumDistance = player.getRadius() + ball.getRadius();
     const float distanceSquared = deltaX * deltaX + deltaY * deltaY;
 
     if (distanceSquared > minimumDistance * minimumDistance) {
-        return;
+        return false;
     }
 
     float directionX;
@@ -388,8 +391,132 @@ void resolvePlayerBallCollision(const Player& player, Ball& ball) {
 
     ball.setX(player.getX() + directionX * minimumDistance);
     ball.setY(player.getY() + directionY * minimumDistance);
-    ball.setVelocityX(directionX * BALL_IMPACT_SPEED);
-    ball.setVelocityY(directionY * BALL_IMPACT_SPEED);
+    const float relativeNormalVelocity =
+            (ball.getVelocityX() - playerVelocityX) * directionX
+            + (ball.getVelocityY() - playerVelocityY) * directionY;
+    if (allowImpulse && relativeNormalVelocity < -0.0001F) {
+        ball.setVelocityX(directionX * BALL_IMPACT_SPEED);
+        ball.setVelocityY(directionY * BALL_IMPACT_SPEED);
+        return true;
+    }
+    return false;
+}
+
+std::array<PlayerPosition, Team::MAX_PLAYERS> capturePlayerPositions(const Team& team) {
+    std::array<PlayerPosition, Team::MAX_PLAYERS> positions{};
+    for (std::size_t index = 0; index < team.getPlayerCount(); ++index) {
+        const Player& player = *team.getPlayers()[index];
+        positions[index] = {player.getX(), player.getY()};
+    }
+    return positions;
+}
+
+void resolveTeamBallCollisions(
+        const Team& team, const std::array<PlayerPosition, Team::MAX_PLAYERS>& previous,
+        Ball& ball, float deltaTime, bool& impulseApplied) {
+    for (std::size_t index = 0; index < team.getPlayerCount(); ++index) {
+        const Player& player = *team.getPlayers()[index];
+        const float velocityX = deltaTime > 0.0F
+                ? (player.getX() - previous[index].x) / deltaTime : 0.0F;
+        const float velocityY = deltaTime > 0.0F
+                ? (player.getY() - previous[index].y) / deltaTime : 0.0F;
+        if (resolvePlayerBallCollision(player, ball, velocityX, velocityY,
+                                       !impulseApplied)) {
+            impulseApplied = true;
+        }
+    }
+}
+
+bool isBallPositionClear(const Team& blueTeam, const Team& redTeam,
+                         const Ball& ball) {
+    for (const Team* team : {&blueTeam, &redTeam}) {
+        for (std::size_t index = 0; index < team->getPlayerCount(); ++index) {
+            const Player& player = *team->getPlayers()[index];
+            const float dx = ball.getX() - player.getX();
+            const float dy = ball.getY() - player.getY();
+            const float radius = player.getRadius() + ball.getRadius() - 0.0001F;
+            if (dx * dx + dy * dy < radius * radius) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+void releaseTrappedBall(const Team& blueTeam, const Team& redTeam, Ball& ball) {
+    bool blockedMotion = false;
+    for (const Team* team : {&blueTeam, &redTeam}) {
+        for (std::size_t index = 0; index < team->getPlayerCount(); ++index) {
+            const Player& player = *team->getPlayers()[index];
+            const float dx = ball.getX() - player.getX();
+            const float dy = ball.getY() - player.getY();
+            const float radius = player.getRadius() + ball.getRadius() + 0.001F;
+            if (dx * dx + dy * dy <= radius * radius
+                && dx * ball.getVelocityX() + dy * ball.getVelocityY() < -0.0001F) {
+                blockedMotion = true;
+            }
+        }
+    }
+    if (!blockedMotion && isBallPositionClear(blueTeam, redTeam, ball)) {
+        return;
+    }
+
+    // Also escape opposing tangent contacts instead of bouncing in place.
+    // Search fixed rays for the shortest free exit; ties keep the first ray.
+    constexpr int DIRECTIONS = 16;
+    const float originX = ball.getX();
+    const float originY = ball.getY();
+    float bestDistance = -1.0F;
+    float bestX = originX;
+    float bestY = originY;
+    const std::size_t playerCount = blueTeam.getPlayerCount() + redTeam.getPlayerCount();
+    for (int direction = 0; direction < DIRECTIONS; ++direction) {
+        const double angle = 2.0 * PI * direction / DIRECTIONS;
+        const float nx = static_cast<float>(std::cos(angle));
+        const float ny = static_cast<float>(std::sin(angle));
+        float distance = 0.0F;
+        for (std::size_t pass = 0; pass < playerCount; ++pass) {
+            for (const Team* team : {&blueTeam, &redTeam}) {
+                for (std::size_t index = 0; index < team->getPlayerCount(); ++index) {
+                    const Player& player = *team->getPlayers()[index];
+                    const float dx = originX + nx * distance - player.getX();
+                    const float dy = originY + ny * distance - player.getY();
+                    const float radius = player.getRadius() + ball.getRadius() + 0.001F;
+                    if (dx * dx + dy * dy < radius * radius) {
+                        const float along = dx * nx + dy * ny;
+                        distance += -along + std::sqrt(std::max(
+                                0.0F, along * along + radius * radius - dx * dx - dy * dy));
+                    }
+                }
+            }
+        }
+        Ball candidate = ball;
+        candidate.setX(originX + nx * distance);
+        candidate.setY(originY + ny * distance);
+        candidate.update(0.0F, -FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
+                         -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT, GOAL_DEPTH, GOAL_HALF_HEIGHT);
+        const bool insideBounds =
+                std::abs(candidate.getX() - (originX + nx * distance)) < 0.0001F
+                && std::abs(candidate.getY() - (originY + ny * distance)) < 0.0001F;
+        if (insideBounds && isBallPositionClear(blueTeam, redTeam, candidate)
+            && (bestDistance < 0.0F || distance < bestDistance)) {
+            bestDistance = distance;
+            bestX = candidate.getX();
+            bestY = candidate.getY();
+        }
+    }
+    if (bestDistance >= 0.0F) {
+        const float dx = bestX - originX;
+        const float dy = bestY - originY;
+        const float length = std::sqrt(dx * dx + dy * dy);
+        const float speed = std::hypot(ball.getVelocityX(), ball.getVelocityY());
+        ball.setX(bestX);
+        ball.setY(bestY);
+        if (length > 0.0001F) {
+            ball.setVelocityX(dx / length * speed);
+            ball.setVelocityY(dy / length * speed);
+        }
+    }
 }
 
 bool updatePlaying(GLFWwindow* window,
@@ -397,18 +524,42 @@ bool updatePlaying(GLFWwindow* window,
                    Team& redTeam, TeamControlState& redControlState,
                    Ball& ball,
                    float deltaTime) {
-    handleTeamInput(window, blueTeam, blueControlState,
-                    BLUE_CONTROLS, ball, deltaTime);
-    handleTeamInput(window, redTeam, redControlState,
-                    RED_CONTROLS, ball, deltaTime);
-    resolvePlayerBallCollision(
-            getControlledPlayer(blueTeam, blueControlState), ball);
-    resolvePlayerBallCollision(
-            getControlledPlayer(redTeam, redControlState), ball);
-    ball.update(deltaTime, -FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
-                -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT,
-                GOAL_DEPTH, GOAL_HALF_HEIGHT);
-    return updateScore(ball, blueTeam, redTeam);
+    // Bound travel per step, including the existing impact speed, to avoid
+    // skipping a player during an ordinary frame or a temporary frame delay.
+    const float maximumSpeed = std::max(BALL_IMPACT_SPEED,
+            std::hypot(ball.getVelocityX(), ball.getVelocityY())) + PLAYER_SPEED;
+    const int steps = std::max(1, static_cast<int>(std::ceil(
+            deltaTime * maximumSpeed / (ball.getRadius() * 0.5F))));
+    const float stepTime = deltaTime / static_cast<float>(steps);
+    for (int step = 0; step < steps; ++step) {
+        const auto bluePrevious = capturePlayerPositions(blueTeam);
+        const auto redPrevious = capturePlayerPositions(redTeam);
+        handleTeamInput(window, blueTeam, blueControlState,
+                        BLUE_CONTROLS, ball, stepTime);
+        handleTeamInput(window, redTeam, redControlState,
+                        RED_CONTROLS, ball, stepTime);
+        ball.update(stepTime, -FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
+                    -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT, GOAL_DEPTH, GOAL_HALF_HEIGHT);
+
+        // Fixed Blue/Red, registration order. At most one impulse per step;
+        // extra passes correct positions only, including wall constraints.
+        bool impulseApplied = false;
+        for (int pass = 0; pass < 4; ++pass) {
+            resolveTeamBallCollisions(blueTeam, bluePrevious, ball, stepTime, impulseApplied);
+            resolveTeamBallCollisions(redTeam, redPrevious, ball, stepTime, impulseApplied);
+            impulseApplied = true;
+            ball.update(0.0F, -FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
+                        -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT, GOAL_DEPTH, GOAL_HALF_HEIGHT);
+            if (isBallPositionClear(blueTeam, redTeam, ball)) {
+                break;
+            }
+        }
+        releaseTrappedBall(blueTeam, redTeam, ball);
+        if (updateScore(ball, blueTeam, redTeam)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void resetPlayers(Team& team,
