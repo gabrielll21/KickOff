@@ -411,6 +411,141 @@ std::array<PlayerPosition, Team::MAX_PLAYERS> capturePlayerPositions(const Team&
     return positions;
 }
 
+void correctPlayerPosition(Player& player, float dx, float dy) {
+    player.setX(player.getX() + dx);
+    player.setY(player.getY() + dy);
+    player.keepInside(-FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
+                      -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT);
+}
+
+void resolvePlayerPair(Player& a, bool aControlled, const PlayerPosition& previousA,
+                       Player& b, bool bControlled, const PlayerPosition& previousB) {
+    if (!aControlled && !bControlled) {
+        return;
+    }
+    float dx = b.getX() - a.getX();
+    float dy = b.getY() - a.getY();
+    const float radius = a.getRadius() + b.getRadius();
+    const float distanceSquared = dx * dx + dy * dy;
+    if (distanceSquared >= radius * radius) {
+        return;
+    }
+
+    const float distance = std::sqrt(distanceSquared);
+    if (distance > 0.0001F) {
+        dx /= distance;
+        dy /= distance;
+    } else {
+        // Prefer the previous separation; otherwise choose an inward direction
+        // for a lone controlled player. Two controlled players share the axis.
+        dx = previousB.x - previousA.x;
+        dy = previousB.y - previousA.y;
+        const float previousDistance = std::hypot(dx, dy);
+        if (previousDistance > 0.0001F) {
+            dx /= previousDistance;
+            dy /= previousDistance;
+        } else {
+            dx = aControlled ? (a.getX() >= 0.0F ? 1.0F : -1.0F)
+                             : (b.getX() >= 0.0F ? -1.0F : 1.0F);
+            dy = 0.0F;
+        }
+    }
+
+    const float penetration = radius - distance;
+    const float correctionA = aControlled ? penetration * (bControlled ? 0.5F : 1.0F) : 0.0F;
+    const float correctionB = bControlled ? penetration * (aControlled ? 0.5F : 1.0F) : 0.0F;
+    const float ax = a.getX();
+    const float ay = a.getY();
+    const float bx = b.getX();
+    const float by = b.getY();
+    if (aControlled) correctPlayerPosition(a, -dx * correctionA, -dy * correctionA);
+    if (bControlled) correctPlayerPosition(b, dx * correctionB, dy * correctionB);
+
+    // Transfer correction prevented by a wall to the other movable player.
+    const float blockedA = std::max(0.0F, correctionA
+            - ((ax - a.getX()) * dx + (ay - a.getY()) * dy));
+    const float blockedB = std::max(0.0F, correctionB
+            - ((b.getX() - bx) * dx + (b.getY() - by) * dy));
+    if (bControlled) correctPlayerPosition(b, dx * blockedA, dy * blockedA);
+    if (aControlled) correctPlayerPosition(a, -dx * blockedB, -dy * blockedB);
+}
+
+void resolvePlayerCollisions(
+        Team& blueTeam, const TeamControlState& blueState,
+        const std::array<PlayerPosition, Team::MAX_PLAYERS>& bluePrevious,
+        Team& redTeam, const TeamControlState& redState,
+        const std::array<PlayerPosition, Team::MAX_PLAYERS>& redPrevious) {
+    constexpr std::size_t CAPACITY = 2U * Team::MAX_PLAYERS;
+    std::array<Player*, CAPACITY> players{};
+    std::array<PlayerPosition, CAPACITY> previous{};
+    std::array<bool, CAPACITY> controlled{};
+    std::size_t count = 0;
+    for (std::size_t i = 0; i < blueTeam.getPlayerCount(); ++i, ++count) {
+        players[count] = blueTeam.getPlayers()[i];
+        previous[count] = bluePrevious[i];
+        controlled[count] = i == blueState.controlledPlayerIndex;
+    }
+    for (std::size_t i = 0; i < redTeam.getPlayerCount(); ++i, ++count) {
+        players[count] = redTeam.getPlayers()[i];
+        previous[count] = redPrevious[i];
+        controlled[count] = i == redState.controlledPlayerIndex;
+    }
+
+    constexpr int MAX_PASSES = 8;
+    constexpr float OVERLAP_TOLERANCE = 0.0001F;
+    for (int pass = 0; pass <= MAX_PASSES; ++pass) {
+        std::array<PlayerPosition, CAPACITY> corrections{};
+        bool overlapping = false;
+        for (std::size_t i = 0; i < count; ++i) {
+            for (std::size_t j = i + 1U; j < count; ++j) {
+                if (!controlled[i] && !controlled[j]) continue;
+                const float dx = players[j]->getX() - players[i]->getX();
+                const float dy = players[j]->getY() - players[i]->getY();
+                const float radius = players[i]->getRadius() + players[j]->getRadius();
+                if (dx * dx + dy * dy >= (radius - OVERLAP_TOLERANCE)
+                                                 * (radius - OVERLAP_TOLERANCE)) continue;
+                overlapping = true;
+                Player a = *players[i];
+                Player b = *players[j];
+                resolvePlayerPair(a, controlled[i], previous[i],
+                                   b, controlled[j], previous[j]);
+                corrections[i].x += a.getX() - players[i]->getX();
+                corrections[i].y += a.getY() - players[i]->getY();
+                corrections[j].x += b.getX() - players[j]->getX();
+                corrections[j].y += b.getY() - players[j]->getY();
+            }
+        }
+        if (!overlapping) return;
+        if (pass == MAX_PASSES) break;
+        // Apply simultaneous corrections from a common snapshot, not team order.
+        for (std::size_t i = 0; i < count; ++i) {
+            if (controlled[i]) correctPlayerPosition(*players[i], corrections[i].x, corrections[i].y);
+        }
+    }
+
+    // A blocked cluster cannot push stationary teammates. Prefer the last valid
+    // short-step positions to forcing a player through an obstacle or wall.
+    bool previousValid = true;
+    for (std::size_t i = 0; i < count; ++i) {
+        for (std::size_t j = i + 1U; j < count; ++j) {
+            if (!controlled[i] && !controlled[j]) continue;
+            const float dx = previous[j].x - previous[i].x;
+            const float dy = previous[j].y - previous[i].y;
+            const float radius = players[i]->getRadius() + players[j]->getRadius()
+                                 - OVERLAP_TOLERANCE;
+            if (dx * dx + dy * dy < radius * radius) previousValid = false;
+        }
+    }
+    if (previousValid) {
+        for (std::size_t i = 0; i < count; ++i) {
+            if (controlled[i]) {
+                players[i]->setX(previous[i].x);
+                players[i]->setY(previous[i].y);
+            }
+        }
+    }
+}
+
 void resolveTeamBallCollisions(
         const Team& team, const std::array<PlayerPosition, Team::MAX_PLAYERS>& previous,
         Ball& ball, float deltaTime, bool& impulseApplied) {
@@ -538,6 +673,8 @@ bool updatePlaying(GLFWwindow* window,
                         BLUE_CONTROLS, ball, stepTime);
         handleTeamInput(window, redTeam, redControlState,
                         RED_CONTROLS, ball, stepTime);
+        resolvePlayerCollisions(blueTeam, blueControlState, bluePrevious,
+                                redTeam, redControlState, redPrevious);
         ball.update(stepTime, -FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
                     -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT, GOAL_DEPTH, GOAL_HALF_HEIGHT);
 
