@@ -269,12 +269,35 @@ bool isKeyPressed(GLFWwindow* window, int key) {
     return glfwGetKey(window, key) == GLFW_PRESS;
 }
 
+std::size_t findClosestPlayerIndex(const Team& team, const Ball& ball,
+                                   std::size_t currentIndex) {
+    const auto& players = team.getPlayers();
+    const auto distanceSquared = [&ball](const Player& player) {
+        const float dx = player.getX() - ball.getX();
+        const float dy = player.getY() - ball.getY();
+        return dx * dx + dy * dy;
+    };
+
+    // Starting with the current player preserves selection on a nearest tie.
+    std::size_t closestIndex = currentIndex;
+    float closestDistanceSquared = distanceSquared(*players[currentIndex]);
+    for (std::size_t index = 0; index < team.getPlayerCount(); ++index) {
+        const float candidateDistanceSquared = distanceSquared(*players[index]);
+        if (candidateDistanceSquared < closestDistanceSquared) {
+            closestIndex = index;
+            closestDistanceSquared = candidateDistanceSquared;
+        }
+    }
+    return closestIndex;
+}
+
 void updateControlledPlayerIndex(TeamControlState& state,
-                                 std::size_t playerCount,
+                                 const Team& team, const Ball& ball,
                                  bool switchKeyPressed) {
-    if (switchKeyPressed && !state.switchKeyWasPressed && playerCount > 0U) {
+    if (switchKeyPressed && !state.switchKeyWasPressed
+        && team.getPlayerCount() > 0U) {
         state.controlledPlayerIndex =
-                (state.controlledPlayerIndex + 1U) % playerCount;
+                findClosestPlayerIndex(team, ball, state.controlledPlayerIndex);
     }
     state.switchKeyWasPressed = switchKeyPressed;
 }
@@ -316,8 +339,8 @@ void handlePlayerInput(GLFWwindow* window, Player& player,
 
 void handleTeamInput(GLFWwindow* window, Team& team,
                      TeamControlState& state, const TeamControls& controls,
-                     float deltaTime) {
-    updateControlledPlayerIndex(state, team.getPlayerCount(),
+                     const Ball& ball, float deltaTime) {
+    updateControlledPlayerIndex(state, team, ball,
                                 isKeyPressed(window, controls.switchKey));
     handlePlayerInput(window, getControlledPlayer(team, state),
                       controls, deltaTime);
@@ -375,9 +398,9 @@ bool updatePlaying(GLFWwindow* window,
                    Ball& ball,
                    float deltaTime) {
     handleTeamInput(window, blueTeam, blueControlState,
-                    BLUE_CONTROLS, deltaTime);
+                    BLUE_CONTROLS, ball, deltaTime);
     handleTeamInput(window, redTeam, redControlState,
-                    RED_CONTROLS, deltaTime);
+                    RED_CONTROLS, ball, deltaTime);
     resolvePlayerBallCollision(
             getControlledPlayer(blueTeam, blueControlState), ball);
     resolvePlayerBallCollision(
@@ -432,6 +455,14 @@ void drawTeam(const Team& team) {
     for (std::size_t index = 0; index < team.getPlayerCount(); ++index) {
         drawPlayer(*players[index]);
     }
+}
+
+void drawControlledPlayerIndicator(const Player& player) {
+    constexpr float RADIUS_OFFSET = 0.6F;
+
+    glColor3f(1.0F, 1.0F, 1.0F);
+    glLineWidth(2.0F);
+    drawCircle(player.getX(), player.getY(), player.getRadius() + RADIUS_OFFSET);
 }
 
 void drawBall(const Ball& ball) {
@@ -592,6 +623,8 @@ int main() {
         drawTeam(blueTeam);
         drawTeam(redTeam);
         drawBall(ball);
+        drawControlledPlayerIndicator(getControlledPlayer(blueTeam, blueControlState));
+        drawControlledPlayerIndicator(getControlledPlayer(redTeam, redControlState));
         drawScore(blueTeam, redTeam);
         if (matchState == MatchState::Goal) {
             drawGoalMessage();
