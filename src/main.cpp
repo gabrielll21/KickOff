@@ -534,12 +534,18 @@ bool applyPass(const BallAction& action, TeamControlState& state, Ball& ball) {
     return true;
 }
 
-void applyKick(GLFWwindow* window, const Player& player,
-               const TeamControls& controls, Ball& ball) {
+PlayerPosition currentKickDirection(GLFWwindow* window, const Player& player,
+                                    const TeamControls& controls) {
     PlayerPosition direction = readMovementDirection(window, controls);
     if (direction.x == 0.0F && direction.y == 0.0F) {
         direction.x = player.getTeam() == TeamId::Blue ? 1.0F : -1.0F;
     }
+    return direction;
+}
+
+void applyKick(GLFWwindow* window, const Player& player,
+               const TeamControls& controls, Ball& ball) {
+    const PlayerPosition direction = currentKickDirection(window, player, controls);
     ball.setVelocityX(direction.x * BALL_KICK_SPEED);
     ball.setVelocityY(direction.y * BALL_KICK_SPEED);
 }
@@ -1627,6 +1633,47 @@ void drawControlledPlayerIndicator(const Player& player) {
     drawCircle(player.getX(), player.getY(), player.getRadius() + RADIUS_OFFSET);
 }
 
+void drawKickDirectionArrow(GLFWwindow* window, const Player& player,
+                            const TeamControls& controls, const Ball& ball) {
+    const PlayerPosition direction = currentKickDirection(window, player, controls);
+    const PlayerPosition perpendicular{-direction.y, direction.x};
+    const float radius = player.getRadius();
+    const float start = radius * 1.45F;
+    const float tip = radius * 2.25F;
+    const float headBase = tip - radius * 0.35F;
+    const float halfWidth = radius * 0.23F;
+    const float intensity = canKick(player, ball) ? 1.0F : 0.55F;
+    glPushAttrib(GL_CURRENT_BIT | GL_LINE_BIT);
+    if (player.getTeam() == TeamId::Blue) {
+        glColor3f(0.1F * intensity, 0.3F * intensity, 0.95F * intensity);
+    } else {
+        glColor3f(0.9F * intensity, 0.15F * intensity, 0.15F * intensity);
+    }
+    const auto vertex = [&](float along, float across) {
+        glVertex2f(player.getX() + direction.x * along + perpendicular.x * across,
+                   player.getY() + direction.y * along + perpendicular.y * across);
+    };
+    glLineWidth(2.0F);
+    glBegin(GL_LINES);
+    vertex(start, 0.0F);
+    vertex(headBase, 0.0F);
+    glEnd();
+    glBegin(GL_TRIANGLES);
+    vertex(tip, 0.0F);
+    vertex(headBase, halfWidth);
+    vertex(headBase, -halfWidth);
+    glEnd();
+    glPopAttrib();
+}
+
+void drawKickDirectionIndicators(GLFWwindow* window, Team& blue, const TeamControlState& blueState,
+                                 Team& red, const TeamControlState& redState,
+                                 const Ball& ball, MatchState state) {
+    if (state != MatchState::Playing) return;
+    drawKickDirectionArrow(window, getControlledPlayer(blue, blueState), BLUE_CONTROLS, ball);
+    drawKickDirectionArrow(window, getControlledPlayer(red, redState), RED_CONTROLS, ball);
+}
+
 void drawBall(const Ball& ball) {
     constexpr int SEGMENTS = 48;
 
@@ -1765,6 +1812,9 @@ int main() {
 
         glLoadIdentity();
         drawField();
+        // Draw underneath players/ball so the aiming hint never hides them.
+        drawKickDirectionIndicators(window, blueTeam, blueControlState,
+                                    redTeam, redControlState, ball, match.state);
         drawTeam(blueTeam);
         drawTeam(redTeam);
         drawBall(ball);
