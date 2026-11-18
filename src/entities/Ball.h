@@ -5,7 +5,8 @@ class Ball {
 public:
     Ball(float x, float y, float velocityX, float velocityY, float radius);
 
-    void update(float deltaTime, float left, float right,
+    // Returns true only when a boundary reverses the ball velocity.
+    bool update(float deltaTime, float left, float right,
                 float bottom, float top, float goalDepth,
                 float goalHalfHeight);
 

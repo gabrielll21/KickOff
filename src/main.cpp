@@ -52,7 +52,8 @@ constexpr float BALL_KICK_SPEED = 35.0F;
 constexpr float BALL_PASS_SPEED = 25.0F;
 constexpr float FIELD_HALF_HEIGHT = 34.0F;
 constexpr float GOAL_DEPTH = 2.44F;
-constexpr float GOAL_HALF_HEIGHT = 3.66F;
+constexpr float GOAL_OPENING_SCALE = 1.4F;
+constexpr float GOAL_HALF_HEIGHT = 3.66F * GOAL_OPENING_SCALE;
 constexpr float GOAL_STATE_DURATION = 2.0F;
 constexpr double MATCH_DURATION_SECONDS = 180.0;
 constexpr double TIME_ROUNDING_TOLERANCE = 1e-10;
@@ -1234,14 +1235,12 @@ bool updatePlaying(GLFWwindow* window,
                 blueTeam, blueControlState, ball, blueKick, bluePass) : BallAction{};
         const BallAction redAction = step == 0 ? prepareBallAction(
                 redTeam, redControlState, ball, redKick, redPass) : BallAction{};
-        const float velocityBeforeX = ball.getVelocityX();
-        const float velocityBeforeY = ball.getVelocityY();
-        ball.update(stepTime, -FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
+        const bool rebounded = ball.update(stepTime, -FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
                     -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT, GOAL_DEPTH, GOAL_HALF_HEIGHT);
 
         // A wall rebound ends the initial contact protection: return contacts
         // with the origin player are legitimate collisions again.
-        if (ball.getVelocityX() != velocityBeforeX || ball.getVelocityY() != velocityBeforeY) {
+        if (rebounded) {
             blueControlState.initialContactPlayer = nullptr;
             redControlState.initialContactPlayer = nullptr;
         }
@@ -1262,11 +1261,9 @@ bool updatePlaying(GLFWwindow* window,
                 redControlState.initialContactPlayer = nullptr;
             }
             impulseApplied = true;
-            const float contactVelocityX = ball.getVelocityX();
-            const float contactVelocityY = ball.getVelocityY();
-            ball.update(0.0F, -FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
+            const bool contactRebound = ball.update(0.0F, -FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
                         -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT, GOAL_DEPTH, GOAL_HALF_HEIGHT);
-            if (ball.getVelocityX() != contactVelocityX || ball.getVelocityY() != contactVelocityY) {
+            if (contactRebound) {
                 blueControlState.initialContactPlayer = nullptr;
                 redControlState.initialContactPlayer = nullptr;
                 protectedPlayer = nullptr;
