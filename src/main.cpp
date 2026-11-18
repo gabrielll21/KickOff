@@ -54,6 +54,8 @@ constexpr float FIELD_HALF_HEIGHT = 34.0F;
 constexpr float GOAL_DEPTH = 2.44F;
 constexpr float GOAL_HALF_HEIGHT = 3.66F;
 constexpr float GOAL_STATE_DURATION = 2.0F;
+constexpr double MATCH_DURATION_SECONDS = 180.0;
+constexpr double TIME_ROUNDING_TOLERANCE = 1e-10;
 constexpr double PI = 3.14159265358979323846;
 
 struct PlayerPosition {
@@ -127,7 +129,13 @@ constexpr TeamControls RED_CONTROLS{
 };
 
 enum class GoalSide { None, Left, Right };
-enum class MatchState { Playing, Goal };
+enum class MatchState { Playing, Goal, Finished };
+struct MatchProgress {
+    MatchState state = MatchState::Playing;
+    double remainingTime = MATCH_DURATION_SECONDS;
+    double goalElapsed = 0.0;
+    bool restartWasPressed = false;
+};
 enum class EstimatedPossession { Neutral, Blue, Red };
 enum class TacticalState { Neutral, Attacking, Defending };
 
@@ -1175,7 +1183,9 @@ bool updatePlaying(GLFWwindow* window,
                    Team& blueTeam, TeamControlState& blueControlState,
                    Team& redTeam, TeamControlState& redControlState,
                    Ball& ball,
-                   float deltaTime, EstimatedPossession& possession) {
+                   double deltaTime, EstimatedPossession& possession, double& remainingTime) {
+    if (remainingTime <= 0.0 || deltaTime <= 0.0) return false;
+    deltaTime = std::min(deltaTime, remainingTime);
     // Consume even failed attempts once per frame, never once per substep.
     const bool blueKick = consumeKeyPress(isKeyPressed(window, BLUE_CONTROLS.kickKey),
                                           blueControlState.kickKeyWasPressed);
@@ -1191,8 +1201,14 @@ bool updatePlaying(GLFWwindow* window,
             std::hypot(ball.getVelocityX(), ball.getVelocityY())) + PLAYER_SPEED;
     const int steps = std::max(1, static_cast<int>(std::ceil(
             deltaTime * maximumSpeed / (ball.getRadius() * 0.5F))));
-    const float stepTime = deltaTime / static_cast<float>(steps);
-    for (int step = 0; step < steps; ++step) {
+    const double nominalStep = deltaTime / steps;
+    double processed = 0.0;
+    for (int step = 0; step < steps && remainingTime > 0.0; ++step) {
+        const double interval = std::min(remainingTime,
+                step + 1 == steps ? deltaTime - processed : nominalStep);
+        if (interval <= 0.0) break;
+        const float stepTime = static_cast<float>(interval);
+        if (stepTime <= 0.0F) break;
         const auto bluePrevious = capturePlayerPositions(blueTeam);
         const auto redPrevious = capturePlayerPositions(redTeam);
         handleTeamInput(window, blueTeam, blueControlState,
@@ -1281,6 +1297,11 @@ bool updatePlaying(GLFWwindow* window,
                 }
             }
         }
+        // Count only this simulated interval. A goal at its endpoint still
+        // counts; Goal takes precedence, then leads to Finished if time is up.
+        processed += interval;
+        remainingTime = std::max(0.0, remainingTime - interval);
+        if (remainingTime < TIME_ROUNDING_TOLERANCE) remainingTime = 0.0;
         if (updateScore(ball, blueTeam, redTeam)) {
             possession = EstimatedPossession::Neutral;
             blueControlState.marking = {};
@@ -1313,6 +1334,137 @@ void resetPlay(Team& blueTeam, Team& redTeam, Ball& ball, EstimatedPossession& p
     ball.setY(BALL_INITIAL_Y);
     ball.setVelocityX(BALL_INITIAL_VELOCITY_X);
     ball.setVelocityY(BALL_INITIAL_VELOCITY_Y);
+}
+
+void restartMatch(GLFWwindow* window, Team& blue, Team& red, Ball& ball,
+                  EstimatedPossession& possession, TeamControlState& blueState,
+                  TeamControlState& redState, MatchProgress& match) {
+    resetPlay(blue, red, ball, possession, blueState, redState);
+    blue.resetScore();
+    red.resetScore();
+    match = {};
+    match.restartWasPressed = isKeyPressed(window, GLFW_KEY_R);
+    syncTeamInputState(window, blueState, BLUE_CONTROLS);
+    syncTeamInputState(window, redState, RED_CONTROLS);
+}
+
+void updateMatch(GLFWwindow* window, Team& blue, TeamControlState& blueState,
+                 Team& red, TeamControlState& redState, Ball& ball,
+                 EstimatedPossession& possession, MatchProgress& match, double deltaTime) {
+    const bool restart = consumeKeyPress(isKeyPressed(window, GLFW_KEY_R), match.restartWasPressed);
+    if (match.state == MatchState::Playing) {
+        if (updatePlaying(window, blue, blueState, red, redState, ball,
+                          deltaTime, possession, match.remainingTime)) {
+            match.state = MatchState::Goal;
+            match.goalElapsed = 0.0;
+            resetControlledPlayer(blueState);
+            resetControlledPlayer(redState);
+        } else if (match.remainingTime <= 0.0) {
+            match.state = MatchState::Finished;
+        }
+    } else {
+        syncTeamInputState(window, blueState, BLUE_CONTROLS);
+        syncTeamInputState(window, redState, RED_CONTROLS);
+        if (match.state == MatchState::Goal) {
+            match.goalElapsed += std::max(0.0, deltaTime);
+            if (match.goalElapsed + TIME_ROUNDING_TOLERANCE >= GOAL_STATE_DURATION) {
+                if (match.remainingTime <= 0.0) {
+                    match.state = MatchState::Finished;
+                } else {
+                    resetPlay(blue, red, ball, possession, blueState, redState);
+                    match.state = MatchState::Playing;
+                }
+                match.goalElapsed = 0.0;
+            }
+        } else if (restart) {
+            restartMatch(window, blue, red, ball, possession, blueState, redState, match);
+        }
+    }
+}
+
+std::string formatMatchTime(double remainingTime) {
+    const int seconds = remainingTime > 0.0
+            ? std::max(1, static_cast<int>(std::ceil(remainingTime - TIME_ROUNDING_TOLERANCE))) : 0;
+    const auto twoDigits = [](int value) {
+        return (value < 10 ? std::string("0") : std::string()) + std::to_string(value);
+    };
+    return twoDigits(seconds / 60) + ":" + twoDigits(seconds % 60);
+}
+
+const char* matchResult(const Team& blue, const Team& red) {
+    if (blue.getScore() > red.getScore()) return "BLUE WINS!";
+    if (red.getScore() > blue.getScore()) return "RED WINS!";
+    return "DRAW!";
+}
+
+void drawMatchClock(double remainingTime) {
+    const std::string time = formatMatchTime(remainingTime);
+    constexpr float SCALE = 0.6F;
+    float x = 32.0F;
+    glColor3f(1.0F, 1.0F, 1.0F);
+    for (char c : time) {
+        if (c == ':') {
+            drawFilledRectangle(x + 0.7F, 36.1F, x + 1.1F, 36.5F);
+            drawFilledRectangle(x + 0.7F, 37.5F, x + 1.1F, 37.9F);
+        } else {
+            drawDigit(c - '0', x, 35.5F, SCALE);
+        }
+        x += 3.8F * SCALE;
+    }
+}
+
+// Minimal 5x7 geometric lettering for the final result; no external font.
+std::array<unsigned char, 7> resultGlyph(char c) {
+    switch (c) {
+        case 'B': return {{30,17,17,30,17,17,30}};
+        case 'L': return {{16,16,16,16,16,16,31}};
+        case 'U': return {{17,17,17,17,17,17,14}};
+        case 'E': return {{31,16,16,30,16,16,31}};
+        case 'W': return {{17,17,17,21,21,21,10}};
+        case 'I': return {{31,4,4,4,4,4,31}};
+        case 'N': return {{17,25,25,21,19,19,17}};
+        case 'S': return {{15,16,16,14,1,1,30}};
+        case 'R': return {{30,17,17,30,20,18,17}};
+        case 'D': return {{30,17,17,17,17,17,30}};
+        case 'A': return {{14,17,17,31,17,17,17}};
+        case 'P': return {{30,17,17,30,16,16,16}};
+        case 'T': return {{31,4,4,4,4,4,4}};
+        case 'O': return {{14,17,17,17,17,17,14}};
+        case '!': return {{4,4,4,4,4,0,4}};
+        default: return {{0,0,0,0,0,0,0}};
+    }
+}
+
+void drawResultText(const std::string& text, float y, float scale) {
+    float x = -(static_cast<float>(text.size()) * 6.0F - 1.0F) * scale / 2.0F;
+    for (char c : text) {
+        const auto glyph = resultGlyph(c);
+        for (int row = 0; row < 7; ++row) {
+            for (int column = 0; column < 5; ++column) {
+                if ((glyph[row] & (1U << (4 - column))) != 0U) {
+                    const float left = x + column * scale;
+                    const float bottom = y + (6 - row) * scale;
+                    drawFilledRectangle(left, bottom, left + scale, bottom + scale);
+                }
+            }
+        }
+        x += 6.0F * scale;
+    }
+}
+
+void drawMatchResult(const Team& blue, const Team& red) {
+    glColor3f(0.03F, 0.12F, 0.05F);
+    drawFilledRectangle(-42.0F, -13.0F, 42.0F, 14.0F);
+    glColor3f(1.0F, 0.85F, 0.1F);
+    drawResultText(matchResult(blue, red), 5.0F, 0.8F);
+    glColor3f(1.0F, 1.0F, 1.0F);
+    drawResultText("PRESS R TO RESTART", -8.0F, 0.6F);
+    const float blueWidth = numberWidth(std::to_string(blue.getScore()), 0.8F);
+    const float redWidth = numberWidth(std::to_string(red.getScore()), 0.8F);
+    const float left = -(blueWidth + redWidth + 5.0F) / 2.0F;
+    drawNumber(blue.getScore(), left, -1.5F, 0.8F);
+    drawFilledRectangle(left + blueWidth + 1.5F, 0.2F, left + blueWidth + 3.5F, 0.7F);
+    drawNumber(red.getScore(), left + blueWidth + 5.0F, -1.5F, 0.8F);
 }
 
 void drawPlayer(const Player& player) {
@@ -1473,35 +1625,17 @@ int main() {
     TeamControlState blueControlState{0U, false};
     TeamControlState redControlState{0U, false};
     EstimatedPossession possession = EstimatedPossession::Neutral;
-    MatchState matchState = MatchState::Playing;
-    float goalStateElapsed = 0.0F;
+    MatchProgress match;
 
     double previousTime = glfwGetTime();
 
     while (glfwWindowShouldClose(window) == GLFW_FALSE) {
         const double currentTime = glfwGetTime();
-        const float deltaTime = static_cast<float>(currentTime - previousTime);
+        const double deltaTime = currentTime - previousTime;
         previousTime = currentTime;
 
-        if (matchState == MatchState::Playing) {
-            if (updatePlaying(window,
-                              blueTeam, blueControlState,
-                              redTeam, redControlState,
-                              ball, deltaTime, possession)) {
-                matchState = MatchState::Goal;
-                goalStateElapsed = 0.0F;
-                resetControlledPlayer(blueControlState);
-                resetControlledPlayer(redControlState);
-            }
-        } else {
-            syncTeamInputState(window, blueControlState, BLUE_CONTROLS);
-            syncTeamInputState(window, redControlState, RED_CONTROLS);
-            goalStateElapsed += deltaTime;
-            if (goalStateElapsed >= GOAL_STATE_DURATION) {
-                resetPlay(blueTeam, redTeam, ball, possession, blueControlState, redControlState);
-                matchState = MatchState::Playing;
-            }
-        }
+        updateMatch(window, blueTeam, blueControlState, redTeam, redControlState,
+                    ball, possession, match, deltaTime);
         glClearColor(0.03F, 0.12F, 0.05F, 1.0F);
         glClear(GL_COLOR_BUFFER_BIT);
 
@@ -1513,8 +1647,11 @@ int main() {
         drawControlledPlayerIndicator(getControlledPlayer(blueTeam, blueControlState));
         drawControlledPlayerIndicator(getControlledPlayer(redTeam, redControlState));
         drawScore(blueTeam, redTeam);
-        if (matchState == MatchState::Goal) {
+        drawMatchClock(match.remainingTime);
+        if (match.state == MatchState::Goal) {
             drawGoalMessage();
+        } else if (match.state == MatchState::Finished) {
+            drawMatchResult(blueTeam, redTeam);
         }
 
         glfwSwapBuffers(window);
