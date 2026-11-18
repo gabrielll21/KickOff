@@ -538,6 +538,8 @@ PlayerPosition currentKickDirection(GLFWwindow* window, const Player& player,
                                     const TeamControls& controls) {
     PlayerPosition direction = readMovementDirection(window, controls);
     if (direction.x == 0.0F && direction.y == 0.0F) {
+        // Preserve the existing stationary kick. Remembering only the visual
+        // direction would make the arrow disagree with the actual impulse.
         direction.x = player.getTeam() == TeamId::Blue ? 1.0F : -1.0F;
     }
     return direction;
@@ -1639,7 +1641,8 @@ void drawKickDirectionArrow(GLFWwindow* window, const Player& player,
     const PlayerPosition perpendicular{-direction.y, direction.x};
     const float radius = player.getRadius();
     const float start = radius * 1.45F;
-    const float tip = radius * 2.25F;
+    // Leave the head visible beyond an in-range ball, drawn above the shaft.
+    const float tip = radius * 3.0F;
     const float headBase = tip - radius * 0.35F;
     const float halfWidth = radius * 0.23F;
     const float intensity = canKick(player, ball) ? 1.0F : 0.55F;
