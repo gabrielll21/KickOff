@@ -12,8 +12,6 @@
 #include <string>
 
 namespace {
-constexpr double WORLD_WIDTH = 120.0;
-constexpr double WORLD_HEIGHT = 80.0;
 constexpr float FIELD_HALF_WIDTH = 52.5F;
 constexpr float PLAYER_SPEED = 12.0F;
 constexpr float AI_MOVEMENT_SPEED = 0.6F * PLAYER_SPEED;
@@ -56,6 +54,22 @@ constexpr float BALL_NORMAL_RELATIVE_SPEED = 20.0F;
 constexpr float BALL_KICK_SPEED = 35.0F;
 constexpr float BALL_PASS_SPEED = 25.0F;
 constexpr float FIELD_HALF_HEIGHT = 34.0F;
+// A ball on a wall has its centre one ball radius inside the pitch.
+// Going around it needs playerRadius + ballRadius + clearance between centres,
+// so the player's outer envelope needs 2 * playerRadius + clearance outside.
+constexpr float PLAYER_RECOVERY_CLEARANCE = 0.5F;
+constexpr float PLAYER_RECOVERY_MARGIN = 2.0F * PLAYER_RADIUS + PLAYER_RECOVERY_CLEARANCE;
+constexpr float PLAYER_AREA_HALF_WIDTH = FIELD_HALF_WIDTH + PLAYER_RECOVERY_MARGIN;
+constexpr float PLAYER_AREA_HALF_HEIGHT = FIELD_HALF_HEIGHT + PLAYER_RECOVERY_MARGIN;
+constexpr float KICK_ARROW_TIP_RADIUS_SCALE = 3.0F;
+constexpr float CAMERA_PADDING = 0.5F;
+constexpr double WORLD_WIDTH = 2.0 * (PLAYER_AREA_HALF_WIDTH - PLAYER_RADIUS
+        + KICK_ARROW_TIP_RADIUS_SCALE * PLAYER_RADIUS + CAMERA_PADDING);
+constexpr float SCORE_SCALE = 0.75F;
+constexpr float SCOREBOARD_Y = PLAYER_AREA_HALF_HEIGHT - PLAYER_RADIUS
+        + KICK_ARROW_TIP_RADIUS_SCALE * PLAYER_RADIUS + CAMERA_PADDING;
+// Keep the existing HUD above the entire recovery/arrow envelope.
+constexpr double WORLD_HEIGHT = 2.0 * (SCOREBOARD_Y + 5.0F * SCORE_SCALE + CAMERA_PADDING);
 constexpr float GOAL_DEPTH = 2.44F;
 constexpr float GOAL_OPENING_SCALE = 1.4F;
 constexpr float GOAL_HALF_HEIGHT = 3.66F * GOAL_OPENING_SCALE;
@@ -269,8 +283,8 @@ void drawNumber(int value, float left, float y, float scale) {
 }
 
 void drawScore(const Team& leftTeam, const Team& rightTeam) {
-    constexpr float Y = 35.5F;
-    constexpr float SCALE = 0.75F;
+    constexpr float Y = SCOREBOARD_Y;
+    constexpr float SCALE = SCORE_SCALE;
     const std::string leftText = std::to_string(leftTeam.getScore());
 
     glColor3f(1.0F, 1.0F, 1.0F);
@@ -424,12 +438,31 @@ PlayerPosition readMovementDirection(GLFWwindow* window, const TeamControls& con
     return {directionX, directionY};
 }
 
+void keepPlayerInsideRecoveryArea(Player& player) {
+    player.keepInside(-PLAYER_AREA_HALF_WIDTH, PLAYER_AREA_HALF_WIDTH,
+                      -PLAYER_AREA_HALF_HEIGHT, PLAYER_AREA_HALF_HEIGHT);
+    // The old pitch boundary kept players out of both goal boxes. Retain
+    // that restriction locally, including radius clearance from side walls.
+    for (float side : {-1.0F, 1.0F}) {
+        const float x = player.getX() * side;
+        const float front = FIELD_HALF_WIDTH - player.getRadius();
+        const float back = FIELD_HALF_WIDTH + GOAL_DEPTH + player.getRadius();
+        const float edgeY = GOAL_HALF_HEIGHT + player.getRadius();
+        if (x > front && x < back && std::abs(player.getY()) < edgeY) {
+            if (x - front <= edgeY - std::abs(player.getY())) {
+                player.setX(side * front);
+            } else {
+                player.setY(player.getY() < 0.0F ? -edgeY : edgeY);
+            }
+        }
+    }
+}
+
 void handlePlayerInput(GLFWwindow* window, Player& player,
                        const TeamControls& controls, float deltaTime) {
     const PlayerPosition direction = readMovementDirection(window, controls);
     player.move(direction.x, direction.y, deltaTime);
-    player.keepInside(-FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
-                      -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT);
+    keepPlayerInsideRecoveryArea(player);
 }
 
 void handleTeamInput(GLFWwindow* window, Team& team,
@@ -635,8 +668,7 @@ std::array<PlayerPosition, Team::MAX_PLAYERS> capturePlayerPositions(const Team&
 void correctPlayerPosition(Player& player, float dx, float dy) {
     player.setX(player.getX() + dx);
     player.setY(player.getY() + dy);
-    player.keepInside(-FIELD_HALF_WIDTH, FIELD_HALF_WIDTH,
-                      -FIELD_HALF_HEIGHT, FIELD_HALF_HEIGHT);
+    keepPlayerInsideRecoveryArea(player);
 }
 
 float nearestTeamBallDistance(const Team& team, const Ball& ball) {
@@ -1498,10 +1530,10 @@ void drawMatchClock(double remainingTime) {
     glColor3f(1.0F, 1.0F, 1.0F);
     for (char c : time) {
         if (c == ':') {
-            drawFilledRectangle(x + 0.7F, 36.1F, x + 1.1F, 36.5F);
-            drawFilledRectangle(x + 0.7F, 37.5F, x + 1.1F, 37.9F);
+            drawFilledRectangle(x + 0.7F, SCOREBOARD_Y + 0.6F, x + 1.1F, SCOREBOARD_Y + 1.0F);
+            drawFilledRectangle(x + 0.7F, SCOREBOARD_Y + 2.0F, x + 1.1F, SCOREBOARD_Y + 2.4F);
         } else {
-            drawDigit(c - '0', x, 35.5F, SCALE);
+            drawDigit(c - '0', x, SCOREBOARD_Y, SCALE);
         }
         x += 3.8F * SCALE;
     }
@@ -1642,7 +1674,7 @@ void drawKickDirectionArrow(GLFWwindow* window, const Player& player,
     const float radius = player.getRadius();
     const float start = radius * 1.45F;
     // Leave the head visible beyond an in-range ball, drawn above the shaft.
-    const float tip = radius * 3.0F;
+    const float tip = radius * KICK_ARROW_TIP_RADIUS_SCALE;
     const float headBase = tip - radius * 0.35F;
     const float halfWidth = radius * 0.23F;
     const float intensity = canKick(player, ball) ? 1.0F : 0.55F;
