@@ -18,6 +18,9 @@ Ball::Ball(float x, float y, float velocityX, float velocityY, float radius)
 bool Ball::update(float deltaTime, float left, float right,
                   float bottom, float top, float goalDepth,
                   float goalHalfHeight) {
+    const bool wasInsideGoal = y_ - radius_ >= -goalHalfHeight
+            && y_ + radius_ <= goalHalfHeight
+            && (x_ < left + radius_ || x_ > right - radius_);
     if (deltaTime > 0.0F) {
         const float speed = std::hypot(velocityX_, velocityY_);
         if (speed > 0.0F) {
@@ -37,6 +40,21 @@ bool Ball::update(float deltaTime, float left, float right,
         }
     }
     bool rebounded = false;
+    // Once inside the goal recess, its side walls constrain Y. Falling back
+    // to the pitch X wall here would project the ball several units backwards.
+    if (wasInsideGoal) {
+        const float minGoalY = -goalHalfHeight + radius_;
+        const float maxGoalY = goalHalfHeight - radius_;
+        if (y_ <= minGoalY) {
+            rebounded = velocityY_ < 0.0F;
+            y_ = deltaTime > 0.0F ? std::min(maxGoalY, 2.0F * minGoalY - y_) : minGoalY;
+            velocityY_ = std::abs(velocityY_);
+        } else if (y_ >= maxGoalY) {
+            rebounded = velocityY_ > 0.0F;
+            y_ = deltaTime > 0.0F ? std::max(minGoalY, 2.0F * maxGoalY - y_) : maxGoalY;
+            velocityY_ = -std::abs(velocityY_);
+        }
+    }
 
     const bool insideGoalOpening =
             y_ - radius_ >= -goalHalfHeight
