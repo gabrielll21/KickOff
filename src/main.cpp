@@ -129,12 +129,14 @@ constexpr TeamControls RED_CONTROLS{
 };
 
 enum class GoalSide { None, Left, Right };
-enum class MatchState { Playing, Goal, Finished };
+enum class MatchState { Menu, Playing, Goal, Finished };
 struct MatchProgress {
-    MatchState state = MatchState::Playing;
+    MatchState state = MatchState::Menu;
     double remainingTime = MATCH_DURATION_SECONDS;
     double goalElapsed = 0.0;
     bool restartWasPressed = false;
+    bool enterWasPressed = false;
+    bool menuWasPressed = false;
 };
 enum class EstimatedPossession { Neutral, Blue, Red };
 enum class TacticalState { Neutral, Attacking, Defending };
@@ -1343,6 +1345,9 @@ void restartMatch(GLFWwindow* window, Team& blue, Team& red, Ball& ball,
     blue.resetScore();
     red.resetScore();
     match = {};
+    match.state = MatchState::Playing;
+    match.enterWasPressed = isKeyPressed(window, GLFW_KEY_ENTER);
+    match.menuWasPressed = isKeyPressed(window, GLFW_KEY_M);
     match.restartWasPressed = isKeyPressed(window, GLFW_KEY_R);
     syncTeamInputState(window, blueState, BLUE_CONTROLS);
     syncTeamInputState(window, redState, RED_CONTROLS);
@@ -1352,7 +1357,17 @@ void updateMatch(GLFWwindow* window, Team& blue, TeamControlState& blueState,
                  Team& red, TeamControlState& redState, Ball& ball,
                  EstimatedPossession& possession, MatchProgress& match, double deltaTime) {
     const bool restart = consumeKeyPress(isKeyPressed(window, GLFW_KEY_R), match.restartWasPressed);
-    if (match.state == MatchState::Playing) {
+    const bool play = consumeKeyPress(isKeyPressed(window, GLFW_KEY_ENTER), match.enterWasPressed);
+    const bool menu = consumeKeyPress(isKeyPressed(window, GLFW_KEY_M), match.menuWasPressed);
+    if (isKeyPressed(window, GLFW_KEY_ESCAPE)) {
+        glfwSetWindowShouldClose(window, GLFW_TRUE);
+        return;
+    }
+    if (match.state == MatchState::Menu) {
+        syncTeamInputState(window, blueState, BLUE_CONTROLS);
+        syncTeamInputState(window, redState, RED_CONTROLS);
+        if (play) restartMatch(window, blue, red, ball, possession, blueState, redState, match);
+    } else if (match.state == MatchState::Playing) {
         if (updatePlaying(window, blue, blueState, red, redState, ball,
                           deltaTime, possession, match.remainingTime)) {
             match.state = MatchState::Goal;
@@ -1376,8 +1391,10 @@ void updateMatch(GLFWwindow* window, Team& blue, TeamControlState& blueState,
                 }
                 match.goalElapsed = 0.0;
             }
-        } else if (restart) {
+        } else if (restart || menu) {
+            // R wins a simultaneous R/M press; both edges are consumed.
             restartMatch(window, blue, red, ball, possession, blueState, redState, match);
+            if (!restart) match.state = MatchState::Menu;
         }
     }
 }
@@ -1413,9 +1430,21 @@ void drawMatchClock(double remainingTime) {
     }
 }
 
-// Minimal 5x7 geometric lettering for the final result; no external font.
+// Shared 5x7 geometric lettering for menu and result; no external font.
 std::array<unsigned char, 7> resultGlyph(char c) {
     switch (c) {
+        case 'C': return {{14,17,16,16,16,17,14}};
+        case 'F': return {{31,16,16,30,16,16,16}};
+        case 'G': return {{14,17,16,23,17,17,14}};
+        case 'H': return {{17,17,17,31,17,17,17}};
+        case 'K': return {{17,18,20,24,20,18,17}};
+        case 'M': return {{17,27,21,21,17,17,17}};
+        case 'Q': return {{14,17,17,17,21,18,13}};
+        case 'V': return {{17,17,17,17,17,10,4}};
+        case 'X': return {{17,17,10,4,10,17,17}};
+        case 'Y': return {{17,17,10,4,4,4,4}};
+        case '2': return {{14,17,1,2,4,8,31}};
+        case ':': return {{0,4,4,0,4,4,0}};
         case 'B': return {{30,17,17,30,17,17,30}};
         case 'L': return {{16,16,16,16,16,16,31}};
         case 'U': return {{17,17,17,17,17,17,14}};
@@ -1435,8 +1464,8 @@ std::array<unsigned char, 7> resultGlyph(char c) {
     }
 }
 
-void drawResultText(const std::string& text, float y, float scale) {
-    float x = -(static_cast<float>(text.size()) * 6.0F - 1.0F) * scale / 2.0F;
+void drawResultText(const std::string& text, float y, float scale, float centerX = 0.0F) {
+    float x = centerX - (static_cast<float>(text.size()) * 6.0F - 1.0F) * scale / 2.0F;
     for (char c : text) {
         const auto glyph = resultGlyph(c);
         for (int row = 0; row < 7; ++row) {
@@ -1454,17 +1483,43 @@ void drawResultText(const std::string& text, float y, float scale) {
 
 void drawMatchResult(const Team& blue, const Team& red) {
     glColor3f(0.03F, 0.12F, 0.05F);
-    drawFilledRectangle(-42.0F, -13.0F, 42.0F, 14.0F);
+    drawFilledRectangle(-42.0F, -23.0F, 42.0F, 14.0F);
     glColor3f(1.0F, 0.85F, 0.1F);
     drawResultText(matchResult(blue, red), 5.0F, 0.8F);
     glColor3f(1.0F, 1.0F, 1.0F);
     drawResultText("PRESS R TO RESTART", -8.0F, 0.6F);
+    drawResultText("PRESS M FOR MENU", -14.0F, 0.6F);
+    drawResultText("ESC TO EXIT", -20.0F, 0.5F);
     const float blueWidth = numberWidth(std::to_string(blue.getScore()), 0.8F);
     const float redWidth = numberWidth(std::to_string(red.getScore()), 0.8F);
     const float left = -(blueWidth + redWidth + 5.0F) / 2.0F;
     drawNumber(blue.getScore(), left, -1.5F, 0.8F);
     drawFilledRectangle(left + blueWidth + 1.5F, 0.2F, left + blueWidth + 3.5F, 0.7F);
     drawNumber(red.getScore(), left + blueWidth + 5.0F, -1.5F, 0.8F);
+}
+
+void drawMainMenu() {
+    glColor3f(0.03F, 0.12F, 0.05F);
+    drawFilledRectangle(-51.0F, -32.0F, 51.0F, 33.0F);
+    glColor3f(1.0F, 0.85F, 0.1F);
+    drawResultText("KICKOFF", 24.0F, 0.95F);
+    glColor3f(1.0F, 1.0F, 1.0F);
+    drawResultText("2 PLAYER FOOTBALL", 19.0F, 0.42F);
+    drawResultText("PRESS ENTER TO PLAY", 13.0F, 0.5F);
+    drawResultText("CONTROLS", 8.0F, 0.45F);
+    glColor3f(0.1F, 0.3F, 0.95F);
+    drawResultText("BLUE", 3.0F, 0.55F, -23.0F);
+    glColor3f(0.9F, 0.15F, 0.15F);
+    drawResultText("RED", 3.0F, 0.55F, 23.0F);
+    glColor3f(1.0F, 1.0F, 1.0F);
+    const std::array<const char*, 4> blue{{"MOVE: WASD", "SELECT: TAB", "SHOOT: SPACE", "PASS: Q"}};
+    const std::array<const char*, 4> red{{"MOVE: ARROWS", "SELECT: ENTER", "SHOOT: RIGHT SHIFT", "PASS: RIGHT CTRL"}};
+    for (std::size_t row = 0; row < blue.size(); ++row) {
+        const float y = -3.0F - 5.0F * static_cast<float>(row);
+        drawResultText(blue[row], y, 0.4F, -23.0F);
+        drawResultText(red[row], y, 0.4F, 23.0F);
+    }
+    drawResultText("ESC TO EXIT", -27.0F, 0.45F);
 }
 
 void drawPlayer(const Player& player) {
@@ -1648,7 +1703,9 @@ int main() {
         drawControlledPlayerIndicator(getControlledPlayer(redTeam, redControlState));
         drawScore(blueTeam, redTeam);
         drawMatchClock(match.remainingTime);
-        if (match.state == MatchState::Goal) {
+        if (match.state == MatchState::Menu) {
+            drawMainMenu();
+        } else if (match.state == MatchState::Goal) {
             drawGoalMessage();
         } else if (match.state == MatchState::Finished) {
             drawMatchResult(blueTeam, redTeam);
