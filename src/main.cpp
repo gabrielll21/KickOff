@@ -48,6 +48,11 @@ constexpr float BALL_INITIAL_VELOCITY_X = 14.0F;
 constexpr float BALL_INITIAL_VELOCITY_Y = 9.0F;
 constexpr float BALL_RADIUS = 1.0F;
 constexpr float BALL_IMPACT_SPEED = 20.0F;
+constexpr float BALL_CONTROL_SPEED = 6.0F;
+constexpr float BALL_CONTROL_MAX_BALL_SPEED = 8.0F;
+constexpr float BALL_NORMAL_BALL_SPEED = 14.0F;
+constexpr float BALL_CONTROL_MAX_RELATIVE_SPEED = 13.0F;
+constexpr float BALL_NORMAL_RELATIVE_SPEED = 20.0F;
 constexpr float BALL_KICK_SPEED = 35.0F;
 constexpr float BALL_PASS_SPEED = 25.0F;
 constexpr float FIELD_HALF_HEIGHT = 34.0F;
@@ -591,8 +596,20 @@ bool resolvePlayerBallCollision(const Player& player, Ball& ball,
             (ball.getVelocityX() - playerVelocityX) * directionX
             + (ball.getVelocityY() - playerVelocityY) * directionY;
     if (allowImpulse && relativeNormalVelocity < -0.0001F) {
-        ball.setVelocityX(directionX * BALL_IMPACT_SPEED);
-        ball.setVelocityY(directionY * BALL_IMPACT_SPEED);
+        const float ballSpeed = std::hypot(ball.getVelocityX(), ball.getVelocityY());
+        const float relativeSpeed = std::hypot(ball.getVelocityX() - playerVelocityX,
+                                               ball.getVelocityY() - playerVelocityY);
+        // A buffer above the control impulse avoids switching modes on the
+        // next touch. Blend linearly to the existing response for hard impacts.
+        const float intensity = std::max(0.0F, std::min(1.0F, std::max(
+                (ballSpeed - BALL_CONTROL_MAX_BALL_SPEED)
+                    / (BALL_NORMAL_BALL_SPEED - BALL_CONTROL_MAX_BALL_SPEED),
+                (relativeSpeed - BALL_CONTROL_MAX_RELATIVE_SPEED)
+                    / (BALL_NORMAL_RELATIVE_SPEED - BALL_CONTROL_MAX_RELATIVE_SPEED))));
+        const float responseSpeed = BALL_CONTROL_SPEED
+                + intensity * (BALL_IMPACT_SPEED - BALL_CONTROL_SPEED);
+        ball.setVelocityX(directionX * responseSpeed);
+        ball.setVelocityY(directionY * responseSpeed);
         return true;
     }
     return false;
@@ -1076,7 +1093,7 @@ void resolvePlayerCollisions(
 void resolveTeamBallCollisions(
         const Team& team, const std::array<PlayerPosition, Team::MAX_PLAYERS>& previous,
         Ball& ball, float deltaTime, bool& impulseApplied,
-        const Player* protectedPlayer = nullptr) {
+        const Player* protectedPlayer, const Player* impulsePlayer) {
     for (std::size_t index = 0; index < team.getPlayerCount(); ++index) {
         const Player& player = *team.getPlayers()[index];
         const float velocityX = deltaTime > 0.0F
@@ -1084,10 +1101,45 @@ void resolveTeamBallCollisions(
         const float velocityY = deltaTime > 0.0F
                 ? (player.getY() - previous[index].y) / deltaTime : 0.0F;
         if (resolvePlayerBallCollision(player, ball, velocityX, velocityY,
-                                       !impulseApplied && &player != protectedPlayer)) {
+                                       !impulseApplied && &player != protectedPlayer && &player == impulsePlayer)) {
             impulseApplied = true;
         }
     }
+}
+
+const Player* chooseContactImpulse(
+        const Team& blue, const std::array<PlayerPosition, Team::MAX_PLAYERS>& bluePrevious,
+        const Team& red, const std::array<PlayerPosition, Team::MAX_PLAYERS>& redPrevious,
+        const Ball& ball, float stepTime, const Player* protectedPlayer) {
+    if (stepTime <= 0.0F) return nullptr;
+    const Player* best = nullptr;
+    float bestClosing = 0.0F;
+    bool tied = false;
+    // Rank contacts from one snapshot, not team iteration order. Exact ties
+    // get positional correction only, rather than an arbitrary team impulse.
+    for (const Team* team : {&blue, &red}) {
+        const auto& previous = team == &blue ? bluePrevious : redPrevious;
+        for (std::size_t i = 0; i < team->getPlayerCount(); ++i) {
+            const Player& player = *team->getPlayers()[i];
+            if (&player == protectedPlayer) continue;
+            const float vx = (player.getX() - previous[i].x) / stepTime;
+            const float vy = (player.getY() - previous[i].y) / stepTime;
+            Ball candidate = ball;
+            if (!resolvePlayerBallCollision(player, candidate, vx, vy, true)) continue;
+            const float radius = player.getRadius() + ball.getRadius();
+            const float nx = (candidate.getX() - player.getX()) / radius;
+            const float ny = (candidate.getY() - player.getY()) / radius;
+            const float closing = (vx - ball.getVelocityX()) * nx + (vy - ball.getVelocityY()) * ny;
+            if (closing > bestClosing) {
+                bestClosing = closing;
+                best = &player;
+                tied = false;
+            } else if (closing == bestClosing) {
+                tied = true;
+            }
+        }
+    }
+    return tied ? nullptr : best;
 }
 
 bool isBallPositionClear(const Team& blueTeam, const Team& redTeam,
@@ -1244,19 +1296,58 @@ bool updatePlaying(GLFWwindow* window,
             blueControlState.initialContactPlayer = nullptr;
             redControlState.initialContactPlayer = nullptr;
         }
+        // Reach was captured before ball movement/contact. Execute the winning
+        // manual action before normal impulses; reserve this interval's impulse
+        // slot while keeping all separation and wall corrections enabled.
+        bool actionExecuted = false;
+        const BallAction action = chooseBallAction(blueAction, redAction, ball);
+        if (action.origin != nullptr) {
+            const bool blue = action.origin->getTeam() == TeamId::Blue;
+            TeamControlState& state = blue ? blueControlState : redControlState;
+            bool executed = true;
+            if (action.receiver != nullptr) {
+                executed = applyPass(action, state, ball);
+            } else {
+                applyKick(window, *action.origin, blue ? BLUE_CONTROLS : RED_CONTROLS, ball);
+            }
+            if (executed) {
+                actionExecuted = true;
+                // Keep the origin's identity even after a pass changes selection.
+                blueControlState.initialContactPlayer = blue ? action.origin : nullptr;
+                redControlState.initialContactPlayer = blue ? nullptr : action.origin;
+                if (action.receiver != nullptr) {
+                    updateDefensiveMarking(blue ? blueTeam : redTeam, blue ? redTeam : blueTeam,
+                                           state, blue ? BLUE_INITIAL_POSITIONS : RED_INITIAL_POSITIONS,
+                                           ball, teamTacticalState(action.origin->getTeam(), possession));
+                }
+            }
+        }
         const Player* protectedPlayer = protectedInitialContact(blueControlState, ball);
         const Player* redProtected = protectedInitialContact(redControlState, ball);
         if (protectedPlayer == nullptr) protectedPlayer = redProtected;
 
-        // Fixed Blue/Red, registration order. At most one impulse per step;
-        // extra passes correct positions only, including wall constraints.
-        bool impulseApplied = false;
+        const Player* impulsePlayer = actionExecuted ? nullptr : chooseContactImpulse(
+                blueTeam, bluePrevious, redTeam, redPrevious, ball, stepTime, protectedPlayer);
+        // At most one impulse per interval; further passes only separate.
+        bool impulseApplied = actionExecuted;
+        if (impulsePlayer != nullptr) {
+            const Team& team = impulsePlayer->getTeam() == TeamId::Blue ? blueTeam : redTeam;
+            const auto& previous = impulsePlayer->getTeam() == TeamId::Blue ? bluePrevious : redPrevious;
+            for (std::size_t i = 0; i < team.getPlayerCount(); ++i) {
+                if (team.getPlayers()[i] != impulsePlayer) continue;
+                // Apply the chosen impulse before any other positional contact
+                // can change its normal or remove it from the contact snapshot.
+                impulseApplied = resolvePlayerBallCollision(*impulsePlayer, ball,
+                        (impulsePlayer->getX() - previous[i].x) / stepTime,
+                        (impulsePlayer->getY() - previous[i].y) / stepTime, true);
+            }
+        }
         for (int pass = 0; pass < 4; ++pass) {
             resolveTeamBallCollisions(blueTeam, bluePrevious, ball, stepTime,
-                                      impulseApplied, protectedPlayer);
+                                      impulseApplied, protectedPlayer, impulsePlayer);
             resolveTeamBallCollisions(redTeam, redPrevious, ball, stepTime,
-                                      impulseApplied, protectedPlayer);
-            if (pass == 0 && impulseApplied) {
+                                      impulseApplied, protectedPlayer, impulsePlayer);
+            if (pass == 0 && impulseApplied && !actionExecuted) {
                 blueControlState.initialContactPlayer = nullptr;
                 redControlState.initialContactPlayer = nullptr;
             }
@@ -1272,29 +1363,10 @@ bool updatePlaying(GLFWwindow* window,
                 break;
             }
         }
-        releaseTrappedBall(blueTeam, redTeam, ball);
-        // Apply after this step's contact resolution so the originating
-        // contact cannot overwrite a kick (35) or pass (25) with impact speed 20.
-        const BallAction action = chooseBallAction(blueAction, redAction, ball);
-        if (action.origin != nullptr) {
-            const bool blue = action.origin->getTeam() == TeamId::Blue;
-            TeamControlState& state = blue ? blueControlState : redControlState;
-            bool executed = true;
-            if (action.receiver != nullptr) {
-                executed = applyPass(action, state, ball);
-            } else {
-                applyKick(window, *action.origin, blue ? BLUE_CONTROLS : RED_CONTROLS, ball);
-            }
-            if (executed) {
-                // Keep the origin's identity even after a pass changes selection.
-                blueControlState.initialContactPlayer = blue ? action.origin : nullptr;
-                redControlState.initialContactPlayer = blue ? nullptr : action.origin;
-                if (action.receiver != nullptr) {
-                    updateDefensiveMarking(blue ? blueTeam : redTeam, blue ? redTeam : blueTeam,
-                                           state, blue ? BLUE_INITIAL_POSITIONS : RED_INITIAL_POSITIONS,
-                                           ball, teamTacticalState(action.origin->getTeam(), possession));
-                }
-            }
+        // Preserve the manual direction on its initial interval when already
+        // separated. Recover actual overlaps even when an action just executed.
+        if (!actionExecuted || !isBallPositionClear(blueTeam, redTeam, ball)) {
+            releaseTrappedBall(blueTeam, redTeam, ball);
         }
         // Count only this simulated interval. A goal at its endpoint still
         // counts; Goal takes precedence, then leads to Finished if time is up.
